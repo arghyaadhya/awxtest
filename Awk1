@@ -1,0 +1,28 @@
+#!/bin/bash
+
+# Input file
+INPUT_FILE="/path/to/input.txt"
+
+# Temporary file to store the result
+TEMP_FILE="/tmp/temp_output.txt"
+
+# Pattern to match
+PATTERN="exact_match"
+
+# Process the file
+awk -v pattern="$PATTERN" '
+{
+  if ($0 ~ pattern) {
+    delete_start = NR
+    print_match = 1
+  }
+
+  if (print_match && NF == 0) {  # Stop deletion at blank line
+    delete_start = 0
+    print_match = 0
+  }
+
+  if (delete_start == 0) {
+    print
+  }
+}' "$INPUT_FILE" > "$TEMP_FILE"
