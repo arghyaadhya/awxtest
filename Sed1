@@ -1,0 +1,22 @@
+#!/bin/bash
+
+# Usage: ./script.sh <pattern> <filename>
+pattern=$1
+filename=$2
+
+# Create a temporary file
+temp_file=$(mktemp)
+
+# Use sed to process the file
+sed -n '
+/'"$pattern"'/{
+    :a
+    N
+    /^[^\n]*\n[[:space:]]*$/!ba
+    s/[^\n]*\n//
+    p
+}
+' "$filename" > "$temp_file"
+
+# Replace the original file with the temporary file
+mv "$temp_file" "$filename"
