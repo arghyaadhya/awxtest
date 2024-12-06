@@ -1,0 +1,1 @@
+while read -r hostname; do sshpass -p 'your_password' ssh -o StrictHostKeyChecking=no your_user@$hostname "dmesg | grep -m 1 'nfs not responding'" | awk -v host="$hostname" '{if(NR==1) print host, $0}'; done < hostname_list.txt
