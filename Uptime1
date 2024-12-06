@@ -1,0 +1,24 @@
+#!/bin/bash
+
+# File containing the list of hostnames (one per line)
+HOSTNAME_FILE="/path/to/hostname_list.txt"
+
+# SSH credentials
+SSH_USER="your_ssh_user"
+SSH_KEY="/path/to/your_ssh_key"  # Optional: Use your SSH private key
+
+# Check uptime for each server
+while IFS= read -r hostname; do
+  echo "Checking uptime for $hostname..."
+  
+  # SSH and fetch uptime
+  uptime_output=$(ssh -o BatchMode=yes -o ConnectTimeout=5 -i "$SSH_KEY" "$SSH_USER@$hostname" \
+    "uptime -p" 2>/dev/null)
+
+  # Check if the SSH command succeeded
+  if [[ $? -eq 0 ]]; then
+    echo "$hostname - $uptime_output"
+  else
+    echo "$hostname - Unable to connect or fetch uptime."
+  fi
+done < "$HOSTNAME_FILE"
