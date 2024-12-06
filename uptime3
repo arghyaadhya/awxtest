@@ -1,0 +1,41 @@
+#!/bin/bash
+
+# File containing the list of hostnames (one per line)
+HOSTNAME_FILE="/path/to/hostname_list.txt"
+
+# SSH credentials
+SSH_USER="your_ssh_user"
+SSH_PASSWORD="your_ssh_password"
+
+# Temporary file to store results
+OUTPUT_FILE="/tmp/uptime_check_results.txt"
+> "$OUTPUT_FILE"  # Clear the file
+
+# Read each hostname from the file
+while IFS= read -r hostname || [[ -n "$hostname" ]]; do
+  echo "Checking uptime for $hostname..."
+  
+  # SSH and fetch uptime
+  uptime_output=$(sshpass -p "$SSH_PASSWORD" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 "$SSH_USER@$hostname" \
+    "uptime -p" 2>/dev/null)
+
+  # Check if the SSH command succeeded
+  if [[ $? -eq 0 ]]; then
+    # Extract hours from the uptime
+    if [[ $uptime_output =~ ([0-9]+)\s+hours? ]]; then
+      hours=${BASH_REMATCH[1]}
+      if (( hours < 5 )); then
+        echo "$hostname - $uptime_output" >> "$OUTPUT_FILE"
+      fi
+    elif [[ $uptime_output =~ (minute|second) ]]; then
+      # Include servers with uptime less than 1 hour
+      echo "$hostname - $uptime_output" >> "$OUTPUT_FILE"
+    fi
+  else
+    echo "$hostname - Unable to connect" >> "$OUTPUT_FILE"
+  fi
+done < "$HOSTNAME_FILE"
+
+# Display results for servers with uptime less than 5 hours
+echo "Servers with uptime less than 5 hours:"
+cat "$OUTPUT_FILE"
