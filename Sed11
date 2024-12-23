@@ -1,0 +1,1 @@
+sed -E 's/(^|,)(your_pattern)(,|$)/\1\3/g; s/,,/,/g; s/^,//; s/,$//' input.txt > output.txt
