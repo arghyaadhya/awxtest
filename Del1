@@ -1,0 +1,59 @@
+#!/bin/bash
+
+# Input file
+input_file="input.txt"
+
+# Output file
+output_file="output.txt"
+
+# Pattern to match
+pattern="your_pattern"
+
+awk -v pat="$pattern" '
+BEGIN { delete_above = 0; delete_below = 0; }
+{
+    # Handle deleting above
+    if (delete_above) {
+        if ($0 == "") {
+            delete_above = 0;
+        } else {
+            next;
+        }
+    }
+
+    # Check for matching line
+    if ($0 ~ pat) {
+        # Set delete flags for lines above and below
+        delete_above = 1;
+        delete_below = 1;
+
+        # Remove last saved line (line above current match)
+        if (NR > 1 && last_line != "") {
+            buffer_count--;
+        }
+
+        next;
+    }
+
+    # Handle deleting below
+    if (delete_below) {
+        if ($0 == "") {
+            delete_below = 0;
+        }
+        next;
+    }
+
+    # Save the current line in the buffer
+    buffer[++buffer_count] = $0;
+    last_line = $0;
+}
+
+# Output the remaining lines
+END {
+    for (i = 1; i <= buffer_count; i++) {
+        print buffer[i];
+    }
+}
+' "$input_file" > "$output_file"
+
+echo "Processed file saved to $output_file"
