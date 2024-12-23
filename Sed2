@@ -1,0 +1,1 @@
+sed -E "s/(^|,)$pattern(,|$)/\1\3/g; s/,,/,/g; s/^,//; s/,$//" "$input_file" > "$output_file"
