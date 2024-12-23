@@ -1,0 +1,69 @@
+#!/bin/bash
+
+# Input file
+input_file="input.txt"
+
+# Output file
+output_file="output.txt"
+
+# Pattern to match
+pattern="your_pattern"
+
+awk -v pat="$pattern" '
+{
+    # Store the current line with its line number
+    lines[NR] = $0;
+    line_count = NR; # Total number of lines
+}
+
+END {
+    blank_above = 0; # Line number of blank line above
+    blank_below = 0; # Line number of blank line below
+    delete_start = 0;
+    delete_end = 0;
+
+    for (i = 1; i <= line_count; i++) {
+        # Check if the line is blank and set the `blank_above`
+        if (lines[i] == "") {
+            blank_above = i;
+        }
+
+        # Find the pattern in a line
+        if (lines[i] ~ pat) {
+            # Check if the line contains commas (for multi-entry lines)
+            if (lines[i] ~ /,/) {
+                # Split the line into fields
+                n = split(lines[i], fields, ",");
+                new_line = "";
+                for (j = 1; j <= n; j++) {
+                    if (fields[j] !~ pat) {
+                        new_line = (new_line == "" ? fields[j] : new_line "," fields[j]);
+                    }
+                }
+                # Update the line by removing the matched string
+                lines[i] = new_line;
+            } else {
+                # Handle deletion range if it's a standalone match
+                for (j = i + 1; j <= line_count; j++) {
+                    if (lines[j] == "") {
+                        blank_below = j;
+                        break;
+                    }
+                }
+                delete_start = blank_above + 1;
+                delete_end = blank_below - 1;
+                break; # Process only the first matching standalone case
+            }
+        }
+    }
+
+    # Print lines that are not in the deletion range
+    for (i = 1; i <= line_count; i++) {
+        if (i < delete_start || i > delete_end) {
+            print lines[i];
+        }
+    }
+}
+' "$input_file" > "$output_file"
+
+echo "Processed file saved as $output_file."
