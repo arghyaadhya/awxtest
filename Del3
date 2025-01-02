@@ -1,0 +1,58 @@
+#!/bin/bash
+
+# Input validation
+if [[ $# -ne 2 ]]; then
+  echo "Usage: $0 <file> <string_to_match>"
+  exit 1
+fi
+
+file="$1"
+string="$2"
+
+# Check if file exists
+if [[ ! -f "$file" ]]; then
+  echo "Error: File not found!"
+  exit 1
+fi
+
+# Use a temporary file for processing
+temp_file=$(mktemp)
+
+awk -v search="$string" '
+{
+  lines[NR] = $0
+  if ($0 == search) { 
+    full_match_lines[NR] = 1 
+  } else if ($0 ~ "\\b" search "\\b") { 
+    partial_match_lines[NR] = 1 
+  }
+}
+
+END {
+  for (line_no in full_match_lines) {
+    start = end = line_no
+    # Find blank line above
+    while (start > 1 && lines[start - 1] != "") start--
+    # Find blank line below
+    while (end < NR && lines[end + 1] != "") end++
+    # Mark lines for deletion
+    for (j = start; j <= end; j++) to_delete[j] = 1
+  }
+
+  # Update lines with partial matches
+  for (line_no in partial_match_lines) {
+    lines[line_no] = gensub("\\b" search "\\b", "", "g", lines[line_no])
+    lines[line_no] = gensub("^\\s+|\\s+$", "", "g", lines[line_no]) # Trim
+  }
+
+  # Print updated lines
+  for (k = 1; k <= NR; k++) {
+    if (!to_delete[k] && lines[k] != "") print lines[k]
+  }
+}
+' "$file" > "$temp_file"
+
+# Replace the original file
+mv "$temp_file" "$file"
+
+echo "Processing completed. Check $file."
