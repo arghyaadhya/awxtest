@@ -1,0 +1,62 @@
+#!/bin/bash
+
+# Input file
+input_file="input.txt"
+
+# Output file
+output_file="output.txt"
+
+# Pattern to match
+pattern="your_pattern"
+
+awk -v pat="$pattern" '
+{
+    # Store the current line with its line number
+    lines[NR] = $0;
+}
+
+END {
+    blank_above = 0; # Line number of blank line above
+    blank_below = 0; # Line number of blank line below
+    delete_start = 0;
+    delete_end = 0;
+
+    for (i = 1; i <= NR; i++) {
+        # Find a blank line
+        if (lines[i] == "") {
+            blank_above = i; # Mark the most recent blank line
+        }
+
+        # Match the pattern
+        if (lines[i] ~ ("\\b" pat "\\b")) {
+            if (lines[i] == pat) {
+                # If the line is only the pattern, find the next blank line
+                for (j = i + 1; j <= NR; j++) {
+                    if (lines[j] == "") {
+                        blank_below = j;
+                        break;
+                    }
+                }
+
+                # Mark range for deletion
+                delete_start = blank_above + 1; # Start deleting after last blank
+                delete_end = blank_below - 1;  # End deleting before next blank
+                break; # Process one match
+            } else {
+                # If the line has multiple words, remove only the matched string
+                lines[i] = gensub("\\b" pat "\\b", "", "g", lines[i]);
+                lines[i] = gensub("^ +| +$", "", "g", lines[i]); # Trim spaces
+            }
+        }
+    }
+
+    # Print lines that are NOT in the deletion range
+    for (i = 1; i <= NR; i++) {
+        if (i < delete_start || i > delete_end) {
+            print lines[i];
+        }
+    }
+}
+' "$input_file" > "$output_file"
+
+echo "Processed file saved to $output_file."
