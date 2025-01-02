@@ -1,0 +1,58 @@
+#!/bin/bash
+
+# Input validation
+if [[ $# -ne 2 ]]; then
+  echo "Usage: $0 <file> <string_to_match>"
+  exit 1
+fi
+
+file="$1"
+string="$2"
+
+# Check if file exists
+if [[ ! -f "$file" ]]; then
+  echo "Error: File not found!"
+  exit 1
+fi
+
+# Temporary file
+temp_file=$(mktemp)
+
+awk -v search="$string" '
+BEGIN { delete_block = 0; skip_line = 0 }
+{
+  if (delete_block && $0 == "") { 
+    # Stop deleting once a blank line is found
+    delete_block = 0
+  }
+  
+  if (delete_block == 1) { 
+    # Skip this line
+    next
+  }
+  
+  # Handle lines with exact matches (delete block)
+  if ($0 == search) {
+    delete_block = 1
+    skip_line = 1
+    next
+  }
+  
+  # Handle partial matches (remove only the string)
+  if ($0 ~ "\\b" search "\\b") {
+    $0 = gensub("\\b" search "\\b", "", "g", $0)
+    $0 = gensub("^ +| +$", "", "g", $0) # Trim spaces
+  }
+  
+  # Print the line if not skipped
+  if (!skip_line) print $0
+  skip_line = 0
+}
+END {
+  # Print final lines (clean state)
+}' "$file" > "$temp_file"
+
+# Replace original file
+mv "$temp_file" "$file"
+
+echo "Processing completed. Check $file."
