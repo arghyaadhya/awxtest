@@ -1,0 +1,53 @@
+#!/bin/bash
+
+# Input variables
+file="$1"
+match="$2"
+
+# Ensure file and match string are provided
+if [[ ! -f "$file" || -z "$match" ]]; then
+  echo "Usage: $0 <file> <match_string>"
+  exit 1
+fi
+
+# Use a temporary file for processing
+temp_file=$(mktemp)
+
+awk -v match="$match" '
+{
+  lines[NR] = $0
+  if ($0 == match) {
+    matches[NR] = 1
+  }
+}
+
+END {
+  for (i in matches) {
+    start = end = i
+
+    # Find the blank line above the matched line
+    while (start > 1 && lines[start - 1] != "") start--
+    
+    # Find the blank line below the matched line
+    while (end < NR && lines[end + 1] != "") end++
+    
+    # Mark lines for deletion (from start to end if it’s a full match)
+    if (split(lines[i], words, " ") == 1) {
+      for (j = start; j <= end; j++) to_delete[j] = 1
+    } else {
+      # If there are multiple words in the matched line, modify only the match
+      lines[i] = gensub("\\b" match "\\b", "", "g", lines[i])
+      lines[i] = gensub("^\\s+|\\s+$", "", "g", lines[i]) # Trim any extra spaces
+    }
+  }
+
+  # Print the resulting lines to output
+  for (k = 1; k <= NR; k++) {
+    if (!to_delete[k]) print lines[k]
+  }
+}
+' "$file" > "$temp_file"
+
+# Replace original file with processed content
+mv "$temp_file" "$file"
+echo "Processing completed."
