@@ -1,0 +1,86 @@
+#!/bin/bash
+
+# Usage: ./script.sh <file> <hostname_to_match>
+# Example: ./script.sh config.txt test-1234-001.static.test.com
+
+CONFIG_FILE="$1"
+HOSTNAME="$2"
+
+if [[ -z "$CONFIG_FILE" || -z "$HOSTNAME" ]]; then
+  echo "Usage: $0 <file> <hostname_to_match>"
+  exit 1
+fi
+
+# Backup the original file
+cp "$CONFIG_FILE" "${CONFIG_FILE}.bak"
+
+awk -v host="$HOSTNAME" '
+  BEGIN {
+    block_active = 0
+    delete_block = 0
+    output_block = ""
+  }
+
+  # Detect the start of a block
+  /^Begin Limit$/ {
+    block_active = 1
+    output_block = $0 "\n"
+    delete_block = 0
+    next
+  }
+
+  # Process lines within the block
+  block_active {
+    output_block = output_block $0 "\n"
+
+    # Handle the HOST line specifically
+    if ($1 == "HOST=") {
+      split($2, hosts, " ")
+      host_count = length(hosts)
+      remaining_hosts = ""
+      found_host = 0
+
+      # Process each host and determine if block needs deletion
+      for (i in hosts) {
+        if (hosts[i] == host) {
+          found_host = 1
+        } else {
+          remaining_hosts = remaining_hosts (remaining_hosts == "" ? "" : " ") hosts[i]
+        }
+      }
+
+      # If there is only one host and it matches the search, mark for full deletion
+      if (found_host && host_count == 1) {
+        delete_block = 1
+      } else if (found_host) {
+        # Otherwise, update the HOST line with remaining hosts
+        $2 = remaining_hosts
+        $0 = "HOST=" remaining_hosts
+        output_block = gensub(/HOST=[^\n]+/, $0, "g", output_block)
+      }
+    }
+    next
+  }
+
+  # Detect the end of a block
+  /^End Limit$/ {
+    if (block_active) {
+      output_block = output_block $0 "\n"
+      if (!delete_block) {
+        # Print block if it was not marked for deletion
+        printf "%s", output_block
+      }
+      # Reset for next block
+      block_active = 0
+      output_block = ""
+    }
+    next
+  }
+
+  # Print lines outside of blocks
+  {
+    print $0
+  }
+' "$CONFIG_FILE" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "$CONFIG_FILE"
+
+echo "Processing completed. Original file backed up as ${CONFIG_FILE}.bak."
