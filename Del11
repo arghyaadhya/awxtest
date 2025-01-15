@@ -1,0 +1,79 @@
+#!/bin/bash
+
+# Usage: ./script.sh <file> <hostname_to_match>
+# Example: ./script.sh config.txt test-1234-001.static.test.com
+
+CONFIG_FILE="$1"
+HOSTNAME="$2"
+
+if [[ -z "$CONFIG_FILE" || -z "$HOSTNAME" ]]; then
+  echo "Usage: $0 <file> <hostname_to_match>"
+  exit 1
+fi
+
+# Backup the original file
+cp "$CONFIG_FILE" "${CONFIG_FILE}.bak"
+
+awk -v host="$HOSTNAME" '
+  BEGIN { block_active = 0; delete_block = 0; }
+
+  # Start of a block
+  /^Begin Limit$/ {
+    block_active = 1
+    block_content = $0 "\n"
+    delete_block = 0
+    next
+  }
+
+  # Inside a block
+  block_active {
+    block_content = block_content $0 "\n"
+
+    # Handle HOST line
+    if ($1 == "HOST=") {
+      split($2, hosts, " ")
+      new_host_line = "HOST="
+      found_host = 0
+      host_count = length(hosts)
+
+      # Process hosts
+      for (i in hosts) {
+        if (hosts[i] == host) {
+          found_host = 1
+        } else {
+          new_host_line = new_host_line (new_host_line == "HOST=" ? "" : " ") hosts[i]
+        }
+      }
+
+      # Conditions to delete block or update host line
+      if (found_host) {
+        if (host_count == 1) {
+          delete_block = 1
+        } else {
+          $0 = new_host_line
+        }
+      }
+    }
+    next
+  }
+
+  # End of a block
+  /^End Limit$/ {
+    if (block_active) {
+      block_content = block_content $0 "\n"
+      if (!delete_block) {
+        print block_content
+      }
+      block_active = 0
+      block_content = ""
+    }
+    next
+  }
+
+  # Outside blocks
+  {
+    print $0
+  }
+' "$CONFIG_FILE" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "$CONFIG_FILE"
+
+echo "Processing completed. Original file backed up as ${CONFIG_FILE}.bak."
