@@ -1,0 +1,67 @@
+#!/bin/bash
+
+# Usage: ./script.sh <file> <hostname_to_match>
+# Example: ./script.sh config.txt test-1234-001.static.test.com
+
+CONFIG_FILE="$1"
+HOSTNAME="$2"
+
+# Validate input
+if [[ -z "$CONFIG_FILE" || -z "$HOSTNAME" ]]; then
+  echo "Usage: $0 <file> <hostname_to_match>"
+  exit 1
+fi
+
+if [[ ! -f "$CONFIG_FILE" ]]; then
+  echo "Error: Config file '$CONFIG_FILE' does not exist."
+  exit 1
+fi
+
+# Backup the original file
+cp "$CONFIG_FILE" "${CONFIG_FILE}.bak"
+
+awk -v host="$HOSTNAME" '
+  BEGIN {
+    block_active = 0;     # Indicates if we are inside a block
+    delete_block = 0;     # Whether to delete the current block
+    output_block = "";    # Store the current block
+  }
+
+  # Detect start of a block
+  /^[ \t]*Begin Limit[ \t]*$/ {
+    block_active = 1;
+    delete_block = 0;
+    output_block = $0 "\n";  # Store the line
+    next;
+  }
+
+  # Process lines inside a block
+  block_active {
+    output_block = output_block $0 "\n";
+
+    if ($1 ~ /^HOST=/) {
+      # Extract hosts from the HOST= line
+      hosts_line = substr($0, index($0, "=") + 1);  # Get everything after `=`
+      split(hosts_line, hosts, " ");
+      remaining_hosts = "";
+      found_host = 0;
+
+      # Process each host
+      for (i in hosts) {
+        if (hosts[i] == host) {
+          found_host = 1;
+        } else {
+          remaining_hosts = remaining_hosts (remaining_hosts == "" ? "" : " ") hosts[i];
+        }
+      }
+
+      # If the host exists
+      if (found_host) {
+        if (length(remaining_hosts) == 0) {
+          delete_block = 1;  # Mark block for deletion if no hosts are left
+        } else {
+          gsub(/HOST=.*/, "HOST=" remaining_hosts, $0);  # Update HOST= line
+          output_block = "";  # Replace output_block with updated HOST line
+          output_block = $0 "/N” ....”
+          
+      * some text … ?` REMOVE!!
