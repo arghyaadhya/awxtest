@@ -1,0 +1,78 @@
+#!/bin/bash
+
+# Input file
+input_file="input.txt"
+
+# Output file
+output_file="output.txt"
+
+# Hostname to match
+hostname="your_hostname"
+
+awk -v host="$hostname" '
+{
+    # Store each line with its line number
+    lines[NR] = $0;
+}
+
+{
+    # Start a block when "Begin limit" is encountered
+    if ($0 == "Begin limit") {
+        in_block = 1;
+        delete_start = NR;
+        block_content = "";
+        return;  # Continue to next line
+    }
+
+    # Close a block when "End limit" is encountered
+    if ($0 == "End limit" && in_block) {
+        in_block = 0;
+        delete_end = NR;
+
+        # Check whether the block contains only the hostname
+        block_contains_only_hostname = 1;
+        block_contains_hostname = 0;
+
+        # Look for the matched hostname and non-empty lines
+        for (i = delete_start + 1; i < delete_end; i++) {
+            if (lines[i] ~ host) {
+                block_contains_hostname = 1;
+            }
+            if (lines[i] !~ host && lines[i] !~ /^[[:space:]]*$/) {
+                block_contains_only_hostname = 0;
+            }
+        }
+
+        # Delete the entire block if it contains only the matched hostname
+        if (block_contains_only_hostname) {
+            for (i = delete_start; i <= delete_end; i++) {
+                delete_flag[i] = 1;
+            }
+        }
+        # Delete only matched lines in the block if it contains other hostnames
+        else if (block_contains_hostname) {
+            for (i = delete_start + 1; i < delete_end; i++) {
+                if (lines[i] ~ host) {
+                    delete_flag[i] = 1;
+                }
+            }
+        }
+    }
+
+    # Collect content inside a block while it is open
+    if (in_block && $0 != "Begin limit" && $0 != "End limit") {
+        block_content = block_content $0 "\n";
+    }
+}
+
+END {
+    # Print out lines that are not flagged for deletion
+    for (i = 1; i <= NR; i++) {
+        if (!delete_flag[i]) {
+            print lines[i];
+        }
+    }
+}
+' "$input_file" > "$output_file"
+
+echo "Processed file saved to $output_file."
