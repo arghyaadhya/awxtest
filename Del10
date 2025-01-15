@@ -1,0 +1,94 @@
+#!/bin/bash
+
+# Usage: ./script.sh <file> <hostname_to_match>
+# Example: ./script.sh config.txt test-1234-001.static.test.com
+
+CONFIG_FILE="$1"
+HOSTNAME="$2"
+
+# Validate input
+if [[ -z "$CONFIG_FILE" || -z "$HOSTNAME" ]]; then
+  echo "Usage: $0 <file> <hostname_to_match>"
+  exit 1
+fi
+
+if [[ ! -f "$CONFIG_FILE" ]]; then
+  echo "Error: Config file '$CONFIG_FILE' does not exist."
+  exit 1
+fi
+
+# Backup the original file
+cp "$CONFIG_FILE" "${CONFIG_FILE}.bak"
+
+# Process the file using AWK
+awk -v host="$HOSTNAME" '
+BEGIN {
+    block_active = 0;  # To track block status (inside Begin Limit / End Limit)
+    delete_block = 0;  # To mark the block for deletion if the host is found and is the only one
+    output_block = ""; # To hold the current block's content
+}
+
+# Detect Start of a block (Begin Limit)
+/^Begin[[:space:]]*Limit/ {
+    block_active = 1;
+    delete_block = 0;
+    output_block = $0 "\n"; # Store the Begin Limit
+    next;
+}
+
+# Process inside the block, while block_active is true
+block_active {
+    output_block = output_block $0 "\n";  # Add current line to the block
+
+    # Check if line contains a HOST=
+    if ($1 ~ /^HOST=/) {
+        hosts_line = substr($0, index($0, "=") + 1);  # Everything after the 'HOST='
+        split(hosts_line, hosts, " ");  # Split into individual hosts
+        remaining_hosts = "";  # For storing hosts after removal
+        found_host = 0;  # To track if the target host is found
+
+        # Loop through hosts to process them
+        for (i in hosts) {
+            if (hosts[i] == host) {
+                found_host = 1; # Mark if target host is found
+            } else {
+                if (remaining_hosts == "") {
+                    remaining_hosts = hosts[i];
+                } else {
+                    remaining_hosts = remaining_hosts " " hosts[i];  # Add remaining hosts
+                }
+            }
+        }
+
+        # Case: If only the matched host is present, mark the block for deletion
+        if (found_host && remaining_hosts == "") {
+            delete_block = 1;
+        }
+
+        # Case: Host found and remaining hosts exist, update the HOST= line
+        if (found_host && remaining_hosts != "") {
+            gsub(/HOST=.*/, "HOST=" remaining_hosts, $0);
+            output_block = $0 "\n";  # Store the modified HOST line
+        }
+    }
+    next;
+}
+
+# End of Block detection (End Limit)
+/^End[[:space:]]*Limit/ {
+    if (block_active && !delete_block) {
+        output_block = output_block $0 "\n";  # Add End Limit line to block
+        print output_block;  # Print the block if it's not marked for deletion
+    }
+    block_active = 0;  # End block processing
+    output_block = ""; # Reset block storage
+    next;
+}
+
+# Print non-block lines (outside Begin/End Limit)
+!block_active {
+    print $0;
+}
+' "$CONFIG_FILE" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "$CONFIG_FILE"
+
+echo "Processing completed. Backup saved as ${CONFIG_FILE}.bak."
