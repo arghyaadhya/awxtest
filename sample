@@ -1,0 +1,14 @@
+Begin Limit
+NAME=test_app_quser
+HOST=test-1234-001.static.test.com test-1234-002.static.test.com test-1234-003.static.test.com test-1234-005.static.test.com
+APPS=all ~test_linux
+SLOTS=0
+End Limit
+
+Begin Limit
+NAME=test_app_quser
+HOST=test-1234-001.static.test.com
+APPS=all ~test_linux
+SLOTS=0
+End Limit
+
