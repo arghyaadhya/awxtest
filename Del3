@@ -1,0 +1,67 @@
+#!/bin/bash
+
+# Check for required arguments
+if [ "$#" -ne 2 ]; then
+    echo "Usage: $0 <filename> <hostname>"
+    exit 1
+fi
+
+FILENAME=$1
+HOSTNAME=$2
+
+# Validate that the file exists
+if [ ! -f "$FILENAME" ]; then
+    echo "Error: File $FILENAME not found."
+    exit 1
+fi
+
+# Use awk to handle processing
+awk -v hostname="$HOSTNAME" '
+BEGIN {
+    deleting = 0
+    matched_host = 0
+}
+
+/^Begin limit$/ {
+    # Detect start of block
+    deleting = 1
+    buffer = ""   # Reset buffer to capture block
+}
+
+/^End limit$/ {
+    # Handle end of block
+    if (matched_host) {
+        deleting = 0
+        matched_host = 0
+        next   # Skip writing the block
+    }
+    if (deleting) {
+        print buffer  # Output block if no match
+        deleting = 0
+        matched_host = 0
+    }
+}
+
+/^[[:space:]]*$/ {
+    # Blank line handler
+    if (deleting && matched_host == 0) {
+        deleting = 0
+        print buffer
+        buffer = ""
+    }
+    print
+    next
+}
+
+{
+    if (deleting) {
+        buffer = buffer (buffer ? "\n" : "") $0
+        if ($0 ~ hostname) {
+            matched_host = 1
+        }
+        next
+    }
+    print
+}' "$FILENAME" > "${FILENAME}.tmp" && mv "${FILENAME}.tmp" "$FILENAME"
+
+echo "Processing completed for hostname '$HOSTNAME' in file '$FILENAME'."
