@@ -1,0 +1,64 @@
+#!/bin/bash
+
+# Input file and output file
+input_file="input.txt"
+output_file="output.txt"
+
+# Hostname to match
+hostname="your_hostname"
+
+# Temporary variables
+in_block=false          # Whether we're inside a block
+block_lines=()          # Array to store lines of the current block
+
+# Function to process and print the block
+process_block() {
+    block_has_hostname=false
+    block_only_hostname=true
+
+    for line in "${block_lines[@]}"; do
+        if [[ $line == "$hostname" ]]; then
+            block_has_hostname=true
+        else
+            if [[ $line != "Begin limit" && $line != "End limit" && $line != "" ]]; then
+                block_only_hostname=false
+            fi
+        fi
+    done
+
+    # Decide what to print
+    if $block_only_hostname && $block_has_hostname; then
+        # Skip entire block
+        return
+    elif $block_has_hostname; then
+        # Print the block without the matching hostname line
+        for line in "${block_lines[@]}"; do
+            [[ $line != "$hostname" ]] && echo "$line"
+        done
+    else
+        # Print the block as-is
+        for line in "${block_lines[@]}"; do
+            echo "$line"
+        done
+    fi
+}
+
+# Main processing loop
+while IFS= read -r line || [[ -n $line ]]; do
+    if [[ $line == "Begin limit" ]]; then
+        in_block=true
+        block_lines=("$line")  # Start a new block
+    elif [[ $line == "End limit" ]]; then
+        block_lines+=("$line") # End the block
+        process_block           # Process and print the block
+        in_block=false
+        block_lines=()          # Clear the block
+    elif $in_block; then
+        block_lines+=("$line")  # Add line to the block
+    else
+        # Print non-block lines directly
+        echo "$line"
+    fi
+done < "$input_file" > "$output_file"
+
+echo "Processed file saved to $output_file."
