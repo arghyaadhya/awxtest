@@ -1,0 +1,65 @@
+#!/bin/bash
+
+# Input and output files
+input_file="input.txt"
+output_file="output.txt"
+
+# Hostname to match
+hostname="your_hostname"
+
+# Variables for block handling
+in_block=false          # Tracks whether we're inside a block
+block_lines=()          # Stores lines in the current block
+
+# Function to process the block
+process_block() {
+    block_only_hostname=true
+    processed_lines=()
+
+    for line in "${block_lines[@]}"; do
+        # Skip the matching hostname entirely
+        if [[ $line =~ $hostname ]]; then
+            modified_line=$(echo "$line" | sed -E "s/(^| )$hostname($| )/ /g" | tr -s ' ')
+            modified_line=$(echo "$modified_line" | sed 's/^ *//;s/ *$//') # Trim spaces
+
+            if [[ -n $modified_line ]]; then
+                processed_lines+=("$modified_line")
+                block_only_hostname=false
+            fi
+        else
+            processed_lines+=("$line")
+            if [[ $line != "Begin limit" && $line != "End limit" && -n $line ]]; then
+                block_only_hostname=false
+            fi
+        fi
+    done
+
+    # Print or skip the block based on content
+    if $block_only_hostname; then
+        return # Skip the entire block
+    fi
+
+    # Output processed lines
+    for line in "${processed_lines[@]}"; do
+        echo "$line"
+    done
+}
+
+# Main script logic
+while IFS= read -r line || [[ -n $line ]]; do
+    if [[ $line == "Begin limit" ]]; then
+        in_block=true
+        block_lines=("$line") # Start collecting block
+    elif [[ $line == "End limit" ]]; then
+        in_block=false
+        block_lines+=("$line") # End the block
+        process_block          # Process and print the block
+        block_lines=()         # Reset for the next block
+    elif $in_block; then
+        block_lines+=("$line") # Add line to the block
+    else
+        echo "$line"           # Output lines outside blocks
+    fi
+done < "$input_file" > "$output_file"
+
+echo "Processed file saved to $output_file."
