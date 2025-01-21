@@ -1,0 +1,74 @@
+#!/bin/bash
+
+# Input file containing the content
+INPUT_FILE="input.txt"
+OUTPUT_FILE="output.tmp"
+
+# Hostname(s) to check, passed as a variable
+MATCHED_HOSTS=("test-1234-001.static.test.com")
+
+# Temporary variables to track state
+inside_block=false
+block_content=()
+should_delete=false
+
+# Ensure output file starts fresh
+> "$OUTPUT_FILE"
+
+# Process each line of the input file
+while IFS= read -r line || [[ -n $line ]]; do
+    # Stop processing the block if a blank line is encountered
+    if [[ -z "$line" ]] && $inside_block; then
+        inside_block=false
+        block_content=()
+        should_delete=false
+    fi
+
+    if [[ "$line" == "Begin Limit" ]]; then
+        # Start processing a block
+        inside_block=true
+        block_content=("$line")
+        should_delete=false
+    elif [[ "$line" == "End Limit" && $inside_block == true ]]; then
+        # End of block
+        block_content+=("$line")
+        inside_block=false
+
+        # Write or skip the block based on the deletion flag
+        if ! $should_delete; then
+            printf "%s\n" "${block_content[@]}" >> "$OUTPUT_FILE"
+        fi
+        block_content=()
+    elif $inside_block; then
+        block_content+=("$line")
+        if [[ "$line" =~ ^HOST=.* ]]; then
+            # Extract hosts from the HOST= line
+            hosts=$(echo "$line" | sed -E 's/^HOST=//')
+            hosts_array=($hosts)
+
+            # Count matches
+            matches=0
+            for h in "${hosts_array[@]}"; do
+                for matched_host in "${MATCHED_HOSTS[@]}"; do
+                    if [[ "$h" == "$matched_host" ]]; then
+                        ((matches++))
+                    fi
+                done
+            done
+
+            # Decide whether to delete based on match count
+            if [[ "$matches" -eq 1 ]]; then
+                should_delete=true
+            elif [[ "$matches" -ge 2 ]]; then
+                should_delete=false
+            fi
+        fi
+    else
+        # Lines outside blocks are written directly to the output
+        echo "$line" >> "$OUTPUT_FILE"
+    fi
+done < "$INPUT_FILE"
+
+# Replace the input file with the processed output file
+mv "$OUTPUT_FILE" "$INPUT_FILE"
+echo "Processing complete. Updated file saved to $INPUT_FILE"
