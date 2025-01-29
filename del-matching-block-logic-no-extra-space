@@ -1,0 +1,49 @@
+awk -v host="$host" '
+{
+    lines[NR] = $0;
+}
+
+END {
+    blank_above = 0;
+    blank_below = 0;
+    delete_start = 0;
+    delete_end = 0;
+
+    for (i = 1; i <= NR; i++) {
+        if (lines[i] == "") {
+            blank_above = i;
+        }
+
+        if (lines[i] ~ host) {
+            for (j = i + 1; j <= NR; j++) {
+                if (lines[j] == "") {
+                    blank_below = j;
+                    break;
+                }
+            }
+
+            delete_start = blank_above + 1;
+            delete_end = blank_below - 1;
+            break;
+        }
+    }
+
+    prev_blank = 0;
+    for (i = 1; i <= NR; i++) {
+        if (i >= delete_start && i <= delete_end) {
+            continue; # Skip the lines marked for deletion
+        }
+
+        if (lines[i] == "") {
+            if (prev_blank) {
+                continue; # Skip consecutive blank lines
+            }
+            prev_blank = 1;
+        } else {
+            prev_blank = 0;
+        }
+
+        print lines[i];
+    }
+}
+'
