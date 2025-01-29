@@ -1,0 +1,42 @@
+awk -v host="$host" '
+{
+    # Store the current line with its line number
+    lines[NR] = $0;
+}
+
+END {
+    blank_above = 0; # Line number of blank line above
+    blank_below = 0; # Line number of blank line below
+    delete_start = 0;
+    delete_end = 0;
+
+    for (i = 1; i <= NR; i++) {
+        # Find a blank line
+        if (lines[i] == "") {
+            blank_above = i; # Mark the most recent blank line
+        }
+
+        # Match the pattern
+        if (lines[i] ~ host) {
+            # Find the next blank line below the match
+            for (j = i + 1; j <= NR; j++) {
+                if (lines[j] == "") {
+                    blank_below = j;
+                    break;
+                }
+            }
+
+            # Mark range for deletion
+            delete_start = blank_above + 1; # Start deleting after last blank
+            delete_end = blank_below - 1;  # End deleting before next blank
+            break; # Process one match
+        }
+    }
+
+    # Print lines that are NOT in the deletion range
+    for (i = 1; i <= NR; i++) {
+        if (i < delete_start || i > delete_end) {
+            print lines[i];
+        }
+    }
+}
