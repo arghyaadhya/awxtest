@@ -1,0 +1,13 @@
+- name: Collect Hostnames from Servers
+  hosts: servers
+  gather_facts: false
+  vars_files:
+    - secrets.yml
+  tasks:
+    - name: Get hostname
+      command: hostname
+      register: hostname_output
+
+    - name: Display hostname
+      debug:
+        msg: "Server {{ inventory_hostname }} hostname is {{ hostname_output.stdout }}"
