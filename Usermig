@@ -1,0 +1,27 @@
+#!/bin/bash
+
+# Define the date format (YYYY-MM-DD)
+DATE=$(date +"%Y-%m-%d")
+
+# Define directory and filenames
+DIR="/path/to/destination/$DATE"
+SOURCE_FILE="/path/to/source/file_$DATE.log"
+DEST_FILE="$DIR/file_$DATE.log"
+PATTERN="ERROR"
+PATTERN_FILE="$DIR/pattern_matches_$DATE.log"
+
+# Create directory if it doesn't exist
+mkdir -p "$DIR"
+
+# Copy the file if it exists
+if [ -f "$SOURCE_FILE" ]; then
+    cp "$SOURCE_FILE" "$DEST_FILE"
+else
+    echo "Source file does not exist: $SOURCE_FILE"
+    exit 1
+fi
+
+# Extract lines matching the pattern and save to a separate file
+grep "$PATTERN" "$DEST_FILE" > "$PATTERN_FILE"
+
+echo "Process completed. Check $DIR for results."
