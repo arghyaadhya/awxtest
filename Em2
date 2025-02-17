@@ -1,0 +1,23 @@
+Subject: Proposed Plan for Force Migration of Users to VDE 8
+
+Dear [Recipient's Name],
+
+As per our recent discussion, I would like to provide an update on the status of the force migration for the users in the US01 sites. Out of the total 1609 users, we are required to force migrate 1454 users. Given the current resource constraints, we have a total of 700+ VDE 8 resources available, of which 500 will be allocated to support the migration to ODC VDE 8.
+
+After discussing with the team, I propose the following plan to ensure a smooth migration process:
+
+1. Batch Migration: We will migrate 500 users at a time to VDE 8, initiating the force migration in stages.
+
+
+2. Waiting Period: Once the first batch is migrated, we will observe a waiting period of 72 hours. After this period, we will decommission the VDE 7 resources and provision new VDE 8 machines for the next batch.
+
+
+3. Subsequent Batches: We will proceed with two additional batches of 500 users each, ensuring a seamless transition to VDE 8. Additionally, we will reserve 200 ODC VDE 8 machines for incoming users.
+
+
+
+Please also advise if it is possible to send a notification email to the users who will be part of the force migration, on behalf of the BU team.
+
+I trust this plan will help facilitate the migration effectively while managing the current resource availability.
+
+Thank you for your attention to this matter. Please let me know if you have any further questions or require additional details.
