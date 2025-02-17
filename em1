@@ -1,0 +1,6 @@
+As per our disscussion, I have generate report from your latest Batch1 report, where in total 1609 users, we need to force migrate 1454 users in US01 sites.
+And as I have already informed that we have currently resources shortage. We have total 700+ VDE 8 are available and in that we can provide 500 users to ODC VDE 8. 
+So, I am proposing 500 users at a time force migration to VDE 8 and then after 72 hours when the waiting period to come back to VDE 7 is over, we will delete those VDE 7 resource
+and create VDE 8 machine, also next batch of 500 users we can force migrate. We can divde into 3 batches to complete this task. We are reservinng 200 ODC VDE 8 machine for the new users.
+
+Also, if it possible to send an email notification from BU side, to those 500 users who will be force migrate to the VDE 8 batch wise. 
