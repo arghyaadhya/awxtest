@@ -1,0 +1,42 @@
+#!/bin/bash
+
+# Check if user provided a number of days as an argument
+if [ $# -ne 2 ]; then
+    echo "Usage: $0 <number_of_days> <filename>"
+    exit 1
+fi
+
+DAYS=$1
+FILE=$2
+
+# Validate that DAYS is a number
+if ! [[ "$DAYS" =~ ^[0-9]+$ ]]; then
+    echo "Error: The first argument must be a positive integer."
+    exit 1
+fi
+
+# Validate that FILE exists
+if [ ! -f "$FILE" ]; then
+    echo "Error: File '$FILE' not found."
+    exit 1
+fi
+
+# Get the current date and subtract the number of days to get the cutoff date
+CUTOFF_DATE=$(date -d "-$DAYS days" +"%m/%d/%Y %H:%M:%S")
+
+echo "Filtering lines before: $CUTOFF_DATE"
+
+# Read the file line by line
+while IFS= read -r line; do
+    # Extract the timestamp field (assuming it's always at position 5)
+    TIMESTAMP=$(echo "$line" | awk -F', ' '{print $5}')
+
+    # Convert extracted date to a comparable format (epoch time)
+    TIMESTAMP_EPOCH=$(date -d "$TIMESTAMP" +"%s" 2>/dev/null)
+    CUTOFF_EPOCH=$(date -d "$CUTOFF_DATE" +"%s")
+
+    # Check if the timestamp is older than the cutoff date
+    if [ "$TIMESTAMP_EPOCH" -lt "$CUTOFF_EPOCH" ]; then
+        echo "$line"
+    fi
+done < "$FILE"
