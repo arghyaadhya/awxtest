@@ -1,0 +1,3 @@
+We have observed that you are running very high number of bsub command is running in this Jenkins node machine, also some of the bsub command is running as defunct process. This creating very high load the node machine. And for the we machine is getting hung and needs reboot frequently.
+
+This is also impacting other users' job. So, you need to stop running so much of the bsub command or else provide us another separate node machine to run your job. 
