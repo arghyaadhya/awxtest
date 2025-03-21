@@ -1,0 +1,5 @@
+We have observed that a very high number of bsub commands are running on this Jenkins node, some of which are becoming defunct processes. This is leading to excessive system load, causing the machine to become unresponsive and requiring frequent reboots.
+
+This issue is not only impacting the stability of the node but is also affecting other users' jobs. To ensure smooth operation for all users, we request you to either reduce the number of bsub commands being executed or provide a dedicated node machine for running your jobs.
+
+Please let us know how you would like to proceed. Your cooperation in resolving this matter would be greatly appreciated.
