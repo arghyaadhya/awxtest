@@ -1,0 +1,20 @@
+import matplotlib.pyplot as plt
+
+# Data
+categories = ['Total Users', 'CS7 Users', 'AI8 Users']
+user_counts = [7000, 6000, 5000]
+colors = ['#4CAF50', '#2196F3', '#FF9800']  # Colors matching the previous chart
+
+# Create bar chart
+plt.figure(figsize=(8, 6))
+plt.bar(categories, user_counts, color=colors, edgecolor=['#388E3C', '#1976D2', '#F57C00'], linewidth=1)
+
+# Customize chart
+plt.title('User Distribution for CS7 and AI8')
+plt.xlabel('User Categories')
+plt.ylabel('Number of Users')
+plt.ylim(0, max(user_counts) + 1000)  # Add some space above max value for clarity
+
+# Save and show the chart
+plt.savefig('user_distribution.png', dpi=300, bbox_inches='tight')
+plt.show()
