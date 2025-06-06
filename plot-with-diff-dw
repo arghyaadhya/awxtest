@@ -1,0 +1,64 @@
+import pandas as pd
+import matplotlib.pyplot as plt
+
+# Read the CSV file
+# Replace 'your_file.csv' with the actual file path
+df = pd.read_csv('your_file.csv')
+
+# Filter rows for '7' excluding 'qa', 'hdx', 'o365'
+filter_7 = df['dg_name'].str.contains('7', case=False, na=False) & \
+           ~df['dg_name'].str.contains('qa|hdx|o365', case=False, na=False)
+df_7 = df[filter_7]
+
+# Filter rows for '8' excluding 'qa', 'hdx', 'o365'
+filter_8 = df['dg_name'].str.contains('8', case=False, na=False) & \
+           ~df['dg_name'].str.contains('qa|hdx|o365', case=False, na=False)
+df_8 = df[filter_8]
+
+# Identify unique dg_name and count users for '7'
+counts_7 = df_7.groupby('dg_name').size().reset_index(name='user_count')
+print("Unique dg_name and User Counts for '7':")
+print(counts_7)
+
+# Identify unique dg_name and count users for '8'
+counts_8 = df_8.groupby('dg_name').size().reset_index(name='user_count')
+print("\nUnique dg_name and User Counts for '8':")
+print(counts_8)
+
+# Create bar chart for '7'
+plt.figure(figsize=(10, 6))
+bars_7 = plt.bar(counts_7['dg_name'], counts_7['user_count'], color='#1f77b4')
+plt.title("User Counts by dg_name for '7' (Excluding qa/hdx/o365)")
+plt.ylabel('Number of Users')
+plt.xlabel('dg_name')
+plt.xticks(rotation=45, ha='right')
+plt.grid(axis='y', linestyle='--', alpha=0.7)
+
+# Add user count numbers on top of each bar for '7'
+for bar in bars_7:
+    yval = bar.get_height()
+    plt.text(bar.get_x() + bar.get_width()/2, yval + 0.5, int(yval), 
+             ha='center', va='bottom', fontsize=10, fontweight='bold')
+
+plt.tight_layout()
+plt.savefig('7_user_counts_chart.png', dpi=300, bbox_inches='tight')
+plt.close()
+
+# Create bar chart for '8'
+plt.figure(figsize=(10, 6))
+bars_8 = plt.bar(counts_8['dg_name'], counts_8['user_count'], color='#ff7f0e')
+plt.title("User Counts by dg_name for '8' (Excluding qa/hdx/o365)")
+plt.ylabel('Number of Users')
+plt.xlabel('dg_name')
+plt.xticks(rotation=45, ha='right')
+plt.grid(axis='y', linestyle='--', alpha=0.7)
+
+# Add user count numbers on top of each bar for '8'
+for bar in bars_8:
+    yval = bar.get_height()
+    plt.text(bar.get_x() + bar.get_width()/2, yval + 0.5, int(yval), 
+             ha='center', va='bottom', fontsize=10, fontweight='bold')
+
+plt.tight_layout()
+plt.savefig('8_user_counts_chart.png', dpi=300, bbox_inches='tight')
+plt.close()
