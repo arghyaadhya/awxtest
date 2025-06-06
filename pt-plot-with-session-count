@@ -1,0 +1,47 @@
+import pandas as pd
+import matplotlib.pyplot as plt
+
+# Read the CSV file
+# Replace 'your_file.csv' with the actual file path
+df = pd.read_csv('your_file.csv')
+
+# Filter rows for '7' excluding 'qa', 'hdx', 'o365'
+filter_7 = df['dg_name'].str.contains('7', case=False, na=False) & \
+           ~df['dg_name'].str.contains('qa|hdx|o365', case=False, na=False)
+count_7 = df[filter_7].shape[0]
+
+# Filter rows for '8' excluding 'qa', 'hdx', 'o365'
+filter_8 = df['dg_name'].str.contains('8', case=False, na=False) & \
+           ~df['dg_name'].str.contains('qa|hdx|o365', case=False, na=False)
+count_8 = df[filter_8].shape[0]
+
+# Calculate total sessions excluding 'qa', 'hdx', 'o365'
+total_sessions = df[~df['dg_name'].str.contains('qa|hdx|o365', case=False, na=False)].shape[0]
+
+# Print the counts
+print(f"Number of rows with '7' (excluding qa/hdx/o365): {count_7}")
+print(f"Number of rows with '8' (excluding qa/hdx/o365): {count_8}")
+print(f"Total sessions (excluding qa/hdx/o365): {total_sessions}")
+
+# Create a 2D bar chart
+labels = ['Total Sessions', "'7' Count", "'8' Count"]
+values = [total_sessions, count_7, count_8]
+
+plt.figure(figsize=(8, 6))
+bars = plt.bar(labels, values, color=['#1f77b4', '#ff7f0e', '#2ca02c'])
+plt.title('Comparison of Total Sessions and Counts for 7 and 8')
+plt.ylabel('Number of Rows')
+plt.xlabel('Categories')
+plt.grid(axis='y', linestyle='--', alpha=0.7)
+
+# Add session count numbers on top of each bar
+for bar in bars:
+    yval = bar.get_height()
+    plt.text(bar.get_x() + bar.get_width()/2, yval + 0.5, int(yval), 
+             ha='center', va='bottom', fontsize=10, fontweight='bold')
+
+plt.tight_layout()
+
+# Save the chart as a PNG file
+plt.savefig('session_counts_chart.png', dpi=300, bbox_inches='tight')
+plt.close()
