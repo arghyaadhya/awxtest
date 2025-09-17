@@ -1,0 +1,192 @@
+---
+- name: Production System Setup and Hardening
+  hosts: all
+  become: yes
+  vars:
+    mount_point: /boot
+    threshold_mb: 900
+    backup_dir: "/etc/yum.repos.d/backup-{{ ansible_date_time.iso8601_basic_short }}"
+    hostname: "{{ ansible_hostname }}"
+
+  tasks:
+    ########################################
+    # Gather OS version and major version
+    ########################################
+    - name: Gather OS release file
+      ansible.builtin.slurp:
+        src: /etc/os-release
+      register: os_release_file
+
+    - name: Set major_version fact
+      ansible.builtin.set_fact:
+        major_version: >-
+          {{
+            (os_release_file.content | b64decode).splitlines()
+            | select('match','^VERSION_ID=') | list | first
+            | regex_replace('VERSION_ID=\"','') | regex_replace('\"','')
+            | split('.') | first
+          }}
+
+    ########################################
+    # Backup existing YUM repo files
+    ########################################
+    - name: Create backup directory for yum repos
+      ansible.builtin.file:
+        path: "{{ backup_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Backup existing yum repo files
+      ansible.builtin.shell: mv /etc/yum.repos.d/* "{{ backup_dir }}/"
+      args:
+        warn: false
+      when: major_version in ['8', '9']
+
+    ########################################
+    # Copy appropriate repo file based on OS version
+    ########################################
+    - name: Copy Alma 8/9 latest repo file
+      ansible.builtin.copy:
+        src: "/tmp/yum.repos.d/alma{{ major_version }}.latest.repo"
+        dest: "/etc/yum.repos.d/alma{{ major_version }}.latest.repo"
+        owner: root
+        group: root
+        mode: '0644'
+      when: major_version in ['8','9']
+
+    ########################################
+    # Apply system configuration files
+    ########################################
+    - name: Copy sysctl configuration
+      ansible.builtin.copy:
+        src: /tmp/sysctl.d/101.conf
+        dest: /etc/sysctl.d/101.conf
+        owner: root
+        group: root
+        mode: '0644'
+
+    ########################################
+    # Disable unwanted services
+    ########################################
+    - name: Stop and disable cups-browsed
+      ansible.builtin.service:
+        name: cups-browsed
+        state: stopped
+        enabled: no
+
+    ########################################
+    # Remove unnecessary packages
+    ########################################
+    - name: Remove packages that are not needed
+      ansible.builtin.yum:
+        name:
+          - cups
+          - php-*
+          - php-pecl-apcu*
+          - node*
+          - ruby*
+        state: absent
+
+    - name: Remove postgres on hosts containing 'a2'
+      ansible.builtin.yum:
+        name: "postgres*"
+        state: absent
+      when: "'a2' in hostname"
+
+    ########################################
+    # Update crypto policies
+    ########################################
+    - name: Copy NO-SHA1-HMAC crypto policy
+      ansible.builtin.copy:
+        src: /tmp/crypto-policies/policies/modules/NO-SHA1-HMAC.pmod
+        dest: /etc/crypto-policies/policies/modules/NO-SHA1-HMAC.pmod
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Apply crypto policy
+      ansible.builtin.command: update-crypto-policies --set DEFAULT:NO-SHA1-HMAC
+      notify:
+        - Restart sshd
+
+    - name: Display MACs configured in sshd
+      ansible.builtin.command: sshd -T
+      register: sshd_config
+      changed_when: false
+
+    - name: Show MACs from sshd
+      ansible.builtin.debug:
+        msg: "{{ sshd_config.stdout_lines | select('search','^macs') | list }}"
+
+    - name: Run nmap ssh2-enum-algos
+      ansible.builtin.command: nmap --script ssh2-enum-algos -sV -p 22 localhost
+      register: nmap_result
+      changed_when: false
+
+    - name: Display nmap result
+      ansible.builtin.debug:
+        msg: "{{ nmap_result.stdout }}"
+
+    - name: Show current crypto policy
+      ansible.builtin.command: update-crypto-policies --show
+      register: crypto_policy
+      changed_when: false
+
+    - name: Display crypto policy
+      ansible.builtin.debug:
+        msg: "{{ crypto_policy.stdout }}"
+
+    ########################################
+    # Check filesystem size for /boot
+    ########################################
+    - name: Get /boot filesystem size in MB
+      ansible.builtin.command: df -BM {{ mount_point }} | awk 'NR==2 {gsub("M", "", $2); print $2}'
+      register: boot_size
+      changed_when: false
+
+    - name: Fail if /boot size is below threshold
+      ansible.builtin.fail:
+        msg: "ERROR: The size of the filesystem mounted at {{ mount_point }} is not greater than {{ threshold_mb }} MB. Aborting..."
+      when: boot_size.stdout | int <= threshold_mb
+
+    ########################################
+    # Set ownership for critical system files
+    ########################################
+    - name: Set ownership for important configuration directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        owner: root
+        group: root
+        recurse: yes
+      loop:
+        - /etc/nsswitch.conf
+        - /etc/security
+        - /etc/ssh/sshd_config.d
+        - /etc/sysctl.d
+        - /etc/sudoers.d
+
+    - name: Ensure /etc/ssh ownership
+      ansible.builtin.file:
+        path: /etc/ssh
+        owner: root
+        group: root
+
+    ########################################
+    # Update system using latest repo only
+    ########################################
+    - name: Update all packages from latest repository
+      ansible.builtin.yum:
+        name: '*'
+        disablerepo: '*'
+        enablerepo: 'latest*'
+        update_only: yes
+        allow_downgrade: yes
+        state: latest
+
+  handlers:
+    - name: Restart sshd
+      ansible.builtin.service:
+        name: sshd
+        state: restarted
