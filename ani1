@@ -1,0 +1,69 @@
+#!/bin/bash
+
+HOSTNAME=`hostname`
+
+date_string=$(date +"%Y-%m-%d-%H%M%S")
+
+mkdir /etc/yum.repos.d/backup-$date_string
+mv /etc/yum.repos.d/* /etc/yum.repos.d/backup-$date_string/
+
+major_version=$(grep '^VERSION_ID=' /etc/os-release | cut -d'"' -f2 | cut -d. -f1)
+if [ "$major_version" == "8" ]; then
+    echo "This is RHEL or Alma 8 ."
+   cp /tmp/yum.repos.d/alma8.latest.repo /etc/yum.repos.d/alma8.latest.repo
+elif [ "$major_version" == "9" ]; then
+    echo "This is Alma 9."
+   cp /tmp/yum.repos.d/alma9.latest.repo /etc/yum.repos.d/alma9.latest.repo
+else
+    echo "This is not RHEL 8 or 9. Detected version: $major_version"
+fi
+
+cp /tmp/sysctl.d/101.conf  /etc/sysctl.d/101.conf
+
+systemctl stop cups-browsed
+systemctl disable cups-browsed
+
+yum remove -y cups
+
+yum remove -y php-pecl-apcu*
+
+yum remove -y php-*
+
+yum remove -y node*
+
+yum remove -y ruby*
+
+# If a2 in name, remove postgres
+if [[ "$HOSTNAME" == *"a2"* ]]; then
+  yum remove -y postgres*
+fi
+
+cp /tmp/crypto-policies/policies/modules/NO-SHA1-HMAC.pmod /etc/crypto-policies/policies/modules/NO-SHA1-HMAC.pmod
+
+update-crypto-policies --set DEFAULT:NO-SHA1-HMAC
+systemctl restart sshd
+sshd -T | grep '^macs'
+
+nmap --script ssh2-enum-algos -sV -p 22 localhost
+
+update-crypto-policies --show
+
+MOUNT_POINT="/boot"
+THRESHOLD=900
+
+# Get the size of the filesystem in GB
+SIZE=$(df -BM "$MOUNT_POINT" | awk 'NR==2 {gsub("M", "", $2); print $2}')
+
+# Check if the size is greater than the threshold
+if [ "$SIZE" -gt "$THRESHOLD" ]; then
+    echo "Good. The size of the filesystem mounted at $MOUNT_POINT is greater than $THRESHOLD MB."
+else
+    echo "ERROR:: The size of the filesystem mounted at $MOUNT_POINT is not greater than $THRESHOLD MB. Aborting....."
+    exit 1
+fi
+
+chown -R root:root /etc/nsswitch.conf /etc/security /etc/ssh/sshd_config.d /etc/sysctl.d /etc/sudoers.d
+chown root:root /etc/ssh
+
+yum --disablerepo=* --enablerepo=latest* --allowerasing update -y 
+
