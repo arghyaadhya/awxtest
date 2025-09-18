@@ -1,0 +1,10 @@
+xe vm-list is-control-domain=false | grep uuid | awk '{print $5}' | while read uuid; do
+    name=$(xe vm-param-get uuid=$uuid param-name=name-label)
+    os=$(xe vm-param-get uuid=$uuid param-name=os-version)
+    # Exclude templates
+    echo "$os" | grep -qi "distro: centos" || continue
+    echo "$os" | grep -qi "major: 7" || continue
+    echo "$name" | grep -qi "template" && continue
+
+    echo "$name"
+done
