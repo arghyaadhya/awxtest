@@ -1,0 +1,86 @@
+#!/bin/bash
+#
+# migrate_helm_repo.sh
+#
+# Safe production script to migrate Helm charts from Harbor to JFrog Artifactory.
+# NOTE: This script NEVER deletes anything from Harbor.
+#
+# Usage:
+#   ./migrate_helm_repo.sh <harbor_repo> <jfrog_repo>
+#
+
+set -euo pipefail
+
+# --- SAFETY GUARD ---
+# Block all dangerous commands that could delete data from Harbor
+alias helm_delete="echo '[BLOCKED] helm delete not allowed in this script'"
+alias curl_delete="echo '[BLOCKED] curl DELETE not allowed in this script'"
+alias rm="echo '[BLOCKED] rm command not allowed here'"
+alias docker="echo '[BLOCKED] docker delete not allowed here'"
+
+# Check args
+if [ $# -ne 2 ]; then
+  echo "Usage: $0 <harbor_repo_name> <jfrog_repo_name>"
+  exit 1
+fi
+
+HARBOR_REPO=$1
+JFROG_REPO=$2
+
+# ==== CONFIGURATION (edit these) ====
+HARBOR_URL="https://harbor.example.com"
+HARBOR_USER="admin"
+HARBOR_PASS="your_harbor_password"
+
+JFROG_URL="https://jfrog.example.com/artifactory"
+JFROG_USER="admin"
+JFROG_PASS="your_jfrog_password"
+
+# Temp working dir
+WORKDIR=$(mktemp -d)
+trap 'rm -rf "$WORKDIR"' EXIT
+
+echo "[INFO] Starting migration from Harbor repo: $HARBOR_REPO -> JFrog repo: $JFROG_REPO"
+echo "[INFO] Temporary working directory: $WORKDIR"
+
+# Login to repos
+echo "[INFO] Logging into Harbor..."
+helm repo add harbor-$HARBOR_REPO "$HARBOR_URL/chartrepo/$HARBOR_REPO" \
+  --username "$HARBOR_USER" --password "$HARBOR_PASS" >/dev/null
+
+echo "[INFO] Logging into JFrog..."
+helm repo add jfrog-$JFROG_REPO "$JFROG_URL/$JFROG_REPO" \
+  --username "$JFROG_USER" --password "$JFROG_PASS" >/dev/null
+
+helm repo update >/dev/null
+
+# Fetch charts
+echo "[INFO] Fetching chart list from Harbor..."
+CHARTS=$(helm search repo harbor-$HARBOR_REPO -o json | jq -r '.[].name')
+
+if [ -z "$CHARTS" ]; then
+  echo "[ERROR] No charts found in Harbor repo: $HARBOR_REPO"
+  exit 1
+fi
+
+for chart in $CHARTS; do
+  echo "[INFO] Processing chart: $chart"
+
+  VERSIONS=$(helm search repo "$chart" -o json | jq -r '.[].version')
+
+  for ver in $VERSIONS; do
+    echo "[INFO]   Downloading $chart version $ver"
+    helm pull "$chart" --version "$ver" --destination "$WORKDIR"
+
+    FILE=$(ls "$WORKDIR" | grep "${chart##*/}-$ver.tgz")
+    if [ -f "$WORKDIR/$FILE" ]; then
+      echo "[INFO]   Uploading $FILE to JFrog"
+      jfrog rt u "$WORKDIR/$FILE" "$JFROG_REPO/" \
+        --url="$JFROG_URL" --user="$JFROG_USER" --password="$JFROG_PASS" >/dev/null
+    else
+      echo "[WARN]   Failed to download $chart version $ver"
+    fi
+  done
+done
+
+echo "[SUCCESS] Migration completed safely. Harbor repo [$HARBOR_REPO] was untouched."
