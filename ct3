@@ -1,0 +1,72 @@
+#!/bin/bash
+# count_centos7_vms.sh
+# Usage: put one hostname per line in hosts.txt and run this script
+
+hosts_file="hosts.txt"
+output_dir="vm_reports"
+csv_file="$output_dir/aggregate_report.csv"
+
+mkdir -p "$output_dir"
+
+if [ ! -f "$hosts_file" ]; then
+    echo "hosts file '$hosts_file' not found. Create it with one host per line."
+    exit 1
+fi
+
+# Write CSV header
+echo "Hostname,Total_CS7_VMs,ADC_Count,DEF_Count" > "$csv_file"
+
+# Aggregate totals
+agg_total=0
+agg_adc=0
+agg_def=0
+
+while read -r host || [ -n "$host" ]; do
+    # skip blank lines and comments
+    [[ -z "${host// }" ]] && continue
+    [[ "${host:0:1}" == "#" ]] && continue
+
+    echo "Processing host: $host"
+    output_file="$output_dir/${host}_centos7_vms.txt"
+    > "$output_file"
+
+    # Run remote command once per host
+    if ! ssh -o BatchMode=yes -o ConnectTimeout=10 "$host" bash -s <<'EOF' > "$output_file"
+xe vm-list is-control-domain=false | grep uuid | awk '{print $5}' | while read uuid; do
+    name=\$(xe vm-param-get uuid=\$uuid param-name=name-label)
+    os=\$(xe vm-param-get uuid=\$uuid param-name=os-version)
+
+    # Exclude non-CentOS 7 and templates
+    echo "\$os" | grep -qi "distro: centos" || continue
+    echo "\$os" | grep -qi "major: 7" || continue
+    echo "\$name" | grep -qi "template" && continue
+
+    echo "\$name"
+done
+EOF
+    then
+        echo "$host,ERROR,ERROR,ERROR" >> "$csv_file"
+        echo "  ERROR: SSH to $host failed. Skipping."
+        continue
+    fi
+
+    # Counts for this host
+    total=$(wc -l < "$output_file" | tr -d ' ')
+    adc=$(grep -iw "\badc\b" "$output_file" | wc -l)
+    def=$(grep -iw "\bdef\b" "$output_file" | wc -l)
+
+    # Update aggregates
+    agg_total=$((agg_total + total))
+    agg_adc=$((agg_adc + adc))
+    agg_def=$((agg_def + def))
+
+    # Append to CSV
+    echo "$host,$total,$adc,$def" >> "$csv_file"
+
+done < "$hosts_file"
+
+# Add aggregate row
+echo "ALL,$agg_total,$agg_adc,$agg_def" >> "$csv_file"
+
+echo "✅ CSV report saved to: $csv_file"
+echo "📂 Per-host VM lists saved in: $output_dir/"
