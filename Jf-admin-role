@@ -1,0 +1,20 @@
+#!/bin/bash
+
+input="projects.txt"
+output="project_group_roles.csv"
+
+# Header for CSV
+echo "ProjectKey,GroupName,Roles" > "$output"
+
+while IFS= read -r project; do
+  echo "Fetching group details for project: $project"
+
+  response=$(curl -s -u "username:apitoken" \
+       -X GET "https://your-jfrog-url/access/api/v1/projects/$project/groups")
+
+  # Parse JSON with jq: group_name and roles
+  echo "$response" | jq -r --arg project "$project" '.[] | [$project, .group_name, (.roles | join(";"))] | @csv' >> "$output"
+
+done < "$input"
+
+echo "✅ Report saved to $output"
