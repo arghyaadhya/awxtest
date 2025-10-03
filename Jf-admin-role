@@ -1,28 +1,24 @@
 #!/bin/bash
 
-input="projects.txt"
-output="project_group_roles.csv"
 token="YOUR_ACCESS_TOKEN"
+input="1"   # file containing project keys (one per line)
+output="project_members.csv"
 
-echo "ProjectKey,GroupName,Role" > "$output"
+# Write CSV header
+echo "ProjectKey,MemberType,MemberName,Roles" > "$output"
 
-while IFS= read -r project; do
-  echo "Fetching group details for project: $project"
+# Loop through each project
+cat "$input" | while read -r project; do
+  echo "Fetching members for project: $project"
 
   response=$(curl -s -H "Authorization: Bearer $token" \
-       -X GET "https://your-jfrog-url/access/api/v1/projects/$project/groups")
+       "https://your-jfrog-url/access/api/v1/projects/$project/members")
 
-  # Try different JSON shapes safely
+  # Parse JSON safely → project, type, name, roles
   echo "$response" | jq -r --arg project "$project" '
-    if has("groups") then
-      .groups[]? | [$project, (.name // .group_name), (.roles | join(";"))] | @csv
-    elif has("roles") then
-      .roles[]? | .groups[]? as $g | [$project, $g, .name] | @csv
-    else
-      [$project, "NoGroups", "None"] | @csv
-    end
+    .members[]? | [$project, .principal_type, .name, (.roles | join(";"))] | @csv
   ' >> "$output"
 
-done < "$input"
+done
 
-echo "Report saved to $output"
+echo "Report generated: $output"
