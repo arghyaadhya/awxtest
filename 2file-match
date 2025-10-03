@@ -1,0 +1,26 @@
+#!/bin/bash
+
+projects="projects.csv"
+members="members.csv"
+output="final_report.csv"
+
+# Write CSV header
+echo "ProjectName,ProjectKey,MemberName,Role" > "$output"
+
+awk -F',' '
+    NR==FNR {
+        # Clean quotes from project file and build map
+        gsub(/"/, "", $1)
+        gsub(/"/, "", $2)
+        project_name[$2]=$1
+        next
+    }
+    {
+        # Match project key in second file
+        key=$1
+        name=project_name[key]
+        print name","key","$2","$3
+    }
+' "$projects" "$members" >> "$output"
+
+echo "✅ Final report saved to $output"
