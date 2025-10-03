@@ -12,8 +12,14 @@ while IFS= read -r project; do
   response=$(curl -s -u "username:apitoken" \
        -X GET "https://your-jfrog-url/access/api/v1/projects/$project/groups")
 
-  # Parse JSON with jq: group_name and roles
-  echo "$response" | jq -r --arg project "$project" '.[] | [$project, .group_name, (.roles | join(";"))] | @csv' >> "$output"
+  # If groups exist, print them; else write "NoGroups"
+  echo "$response" | jq -r --arg project "$project" '
+    if .groups then
+      .groups[]? | [$project, .group_name, (.roles | join(";"))] | @csv
+    else
+      [$project, "NoGroups", "None"] | @csv
+    end
+  ' >> "$output"
 
 done < "$input"
 
