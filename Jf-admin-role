@@ -1,9 +1,10 @@
 #!/bin/bash
 
 token="YOUR_ACCESS_TOKEN"
-input="1"
+input="1"    # file with project keys
 output="project_admins.csv"
 
+# CSV header
 echo "ProjectKey,MemberName,Role" > "$output"
 
 cat "$input" | while read -r project; do
@@ -12,17 +13,19 @@ cat "$input" | while read -r project; do
   response=$(curl -s -H "Authorization: Bearer $token" \
        "https://your-jfrog-url/access/api/v1/projects/$project/members")
 
-  names=($(echo "$response" | grep '"name"'  | awk -F '"' '{print $4}'))
-  roles=($(echo "$response" | grep '"roles"' | awk -F '"' '{print $4}'))
+  # Extract names and roles
+  names=$(echo "$response" | grep '"name"'  | awk -F '"' '{print $4}')
+  roles=$(echo "$response" | grep '"roles"' | awk -F '"' '{print $4}')
 
   found=0
-  for i in "${!roles[@]}"; do
-    if [ "${roles[$i]}" = "Project Admin" ]; then
-      echo "$project,${names[$i]},${roles[$i]}" >> "$output"
+  paste -d'|' <(echo "$names") <(echo "$roles") | while IFS="|" read -r name role; do
+    if [ "$role" = "Project Admin" ]; then
+      echo "$project,$name,$role" >> "$output"
       found=1
     fi
   done
 
+  # If no admin group found, log placeholder
   if [ $found -eq 0 ]; then
     echo "$project,NoGroup,NoRole" >> "$output"
   fi
