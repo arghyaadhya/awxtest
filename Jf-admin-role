@@ -1,24 +1,25 @@
 #!/bin/bash
 
 token="YOUR_ACCESS_TOKEN"
-input="1"   # file containing project keys (one per line)
+input="1"    # file with project keys
 output="project_members.csv"
 
-# Write CSV header
-echo "ProjectKey,MemberType,MemberName,Roles" > "$output"
+# CSV header
+echo "ProjectKey,MemberName,Roles" > "$output"
 
-# Loop through each project
 cat "$input" | while read -r project; do
-  echo "Fetching members for project: $project"
+  echo "Fetching project: $project"
 
   response=$(curl -s -H "Authorization: Bearer $token" \
        "https://your-jfrog-url/access/api/v1/projects/$project/members")
 
-  # Parse JSON safely → project, type, name, roles
-  echo "$response" | jq -r --arg project "$project" '
-    .members[]? | [$project, .principal_type, .name, (.roles | join(";"))] | @csv
-  ' >> "$output"
+  # Extract all names and roles (line by line)
+  names=$(echo "$response" | grep '"name"'  | awk -F '"' '{print $4}')
+  roles=$(echo "$response" | grep '"roles"' | awk -F '"' '{print $4}')
+
+  # Combine into CSV
+  paste -d',' <(echo "$project") <(echo "$names") <(echo "$roles") >> "$output"
 
 done
 
-echo "Report generated: $output"
+echo "✅ Report saved to $output"
