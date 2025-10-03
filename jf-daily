@@ -1,0 +1,66 @@
+import requests
+import json
+import pandas as pd
+
+JFROG_URL = "https://your-jfrog-instance.jfrog.io"
+API_KEY = "YOUR_API_KEY"
+
+HEADERS = {
+    "Authorization": f"Bearer {API_KEY}",
+    "Content-Type": "application/json"
+}
+
+def get_projects():
+    r = requests.get(f"{JFROG_URL}/access/api/v1/projects", headers=HEADERS)
+    r.raise_for_status()
+    return r.json().get("projects", [])
+
+def get_project_permissions(project_key):
+    r = requests.get(f"{JFROG_URL}/access/api/v1/projects/{project_key}/permissions", headers=HEADERS)
+    return r.json() if r.status_code == 200 else []
+
+def get_repo_permissions():
+    r = requests.get(f"{JFROG_URL}/access/api/v2/permissions", headers=HEADERS)
+    r.raise_for_status()
+    return r.json().get("permissions", [])
+
+def main():
+    results = []
+
+    # Project-level
+    for p in get_projects():
+        pk = p["project_key"]
+        for perm in get_project_permissions(pk):
+            groups = perm.get("principals", {}).get("groups", {})
+            for group, actions in groups.items():
+                results.append({
+                    "type": "project",
+                    "project": pk,
+                    "permission_name": perm.get("name"),
+                    "repositories": ",".join(perm.get("repositories", [])),
+                    "ad_group": group,
+                    "actions": ",".join(actions)
+                })
+
+    # Repo-level
+    for perm in get_repo_permissions():
+        groups = perm.get("principals", {}).get("groups", {})
+        for group, actions in groups.items():
+            results.append({
+                "type": "repository",
+                "project": "",
+                "permission_name": perm.get("name"),
+                "repositories": ",".join(perm.get("resources", {}).get("repositories", [])),
+                "ad_group": group,
+                "actions": ",".join(actions)
+            })
+
+    # Save JSON
+    with open("jfrog_permissions.json", "w") as f:
+        json.dump(results, f, indent=2)
+
+    # Also CSV (optional)
+    pd.DataFrame(results).to_csv("jfrog_permissions.csv", index=False)
+
+if __name__ == "__main__":
+    main()
