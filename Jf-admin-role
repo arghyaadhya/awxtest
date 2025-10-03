@@ -2,20 +2,22 @@
 
 input="projects.txt"
 output="project_group_roles.csv"
+token="YOUR_ACCESS_TOKEN"
 
-# Header for CSV
-echo "ProjectKey,GroupName,Roles" > "$output"
+echo "ProjectKey,GroupName,Role" > "$output"
 
 while IFS= read -r project; do
   echo "Fetching group details for project: $project"
 
-  response=$(curl -s -u "username:apitoken" \
+  response=$(curl -s -H "Authorization: Bearer $token" \
        -X GET "https://your-jfrog-url/access/api/v1/projects/$project/groups")
 
-  # If groups exist, print them; else write "NoGroups"
+  # Try different JSON shapes safely
   echo "$response" | jq -r --arg project "$project" '
-    if .groups then
-      .groups[]? | [$project, .group_name, (.roles | join(";"))] | @csv
+    if has("groups") then
+      .groups[]? | [$project, (.name // .group_name), (.roles | join(";"))] | @csv
+    elif has("roles") then
+      .roles[]? | .groups[]? as $g | [$project, $g, .name] | @csv
     else
       [$project, "NoGroups", "None"] | @csv
     end
@@ -23,4 +25,4 @@ while IFS= read -r project; do
 
 done < "$input"
 
-echo "✅ Report saved to $output"
+echo "Report saved to $output"
