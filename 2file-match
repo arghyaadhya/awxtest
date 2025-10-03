@@ -4,20 +4,26 @@ projects="projects.csv"
 members="members.csv"
 output="final_report.csv"
 
-# Write CSV header
+# Write new CSV header
 echo "ProjectName,ProjectKey,MemberName,Role" > "$output"
 
 awk -F',' '
     NR==FNR {
-        # Clean quotes from project file and build map
+        # Read project file first, strip quotes if any
         gsub(/"/, "", $1)
         gsub(/"/, "", $2)
         project_name[$2]=$1
         next
     }
-    {
-        # Match project key in second file
+    NR>FNR {
+        # Skip header row in members.csv
+        if (FNR==1 && $1 ~ /ProjectKey/i) next
+
         key=$1
+        gsub(/"/, "", key)
+        gsub(/"/, "", $2)
+        gsub(/"/, "", $3)
+
         name=project_name[key]
         print name","key","$2","$3
     }
