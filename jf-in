@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>JFrog Permissions Report</title>
+  <link rel="stylesheet" href="https://cdn.datatables.net/1.13.6/css/jquery.dataTables.min.css">
+  <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+  <script src="https://cdn.datatables.net/1.13.6/js/jquery.dataTables.min.js"></script>
+</head>
+<body>
+  <h2>JFrog Permissions Report</h2>
+  <table id="report" class="display" style="width:100%">
+    <thead>
+      <tr>
+        <th>Type</th>
+        <th>Project</th>
+        <th>Permission Name</th>
+        <th>Repositories</th>
+        <th>AD Group</th>
+        <th>Actions</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in data %}
+      <tr>
+        <td>{{ row.type }}</td>
+        <td>{{ row.project }}</td>
+        <td>{{ row.permission_name }}</td>
+        <td>{{ row.repositories }}</td>
+        <td>{{ row.ad_group }}</td>
+        <td>{{ row.actions }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <script>
+    $(document).ready(function() {
+        $('#report').DataTable();
+    });
+  </script>
+</body>
+</html>
