@@ -1,0 +1,73 @@
+#!/bin/bash
+#===============================================================================
+# Script Name  : jfrog_repo_group_audit_nojq.sh
+# Description  : Fetches all Artifactory repositories and groups with manage
+#                permissions using only curl, grep, sed, and awk (no jq).
+#===============================================================================
+# Usage        : ./jfrog_repo_group_audit_nojq.sh
+#===============================================================================
+# Author       : Arghya Adhya
+#===============================================================================
+
+JFROG_URL="https://your-jfrog-url/artifactory"
+API_TOKEN="your_api_token_here"
+OUTPUT_FILE="jfrog_repo_group_audit.csv"
+
+# --- CSV Header ---
+echo "Repository_Key,Repository_Name,Admin_Groups,Non_Admin_Groups" > "$OUTPUT_FILE"
+
+echo "Fetching repository list..."
+repos_json=$(curl -s -H "Authorization: Bearer ${API_TOKEN}" "${JFROG_URL}/api/repositories")
+
+if [[ -z "$repos_json" ]]; then
+    echo "Error: Could not fetch repositories."
+    exit 1
+fi
+
+# --- Extract all repository keys ---
+repo_keys=$(echo "$repos_json" | grep -o '"key" *: *"[^"]*"' | sed 's/.*: *"//;s/"//')
+
+# --- Loop through repositories ---
+for repo_key in $repo_keys; do
+    echo "Processing repository: $repo_key"
+    
+    # Get description (if available)
+    repo_name=$(echo "$repos_json" | grep -A2 "\"key\" *: *\"${repo_key}\"" | grep '"description"' | head -n1 | sed 's/.*: *"//;s/"//')
+    [ -z "$repo_name" ] && repo_name="N/A"
+    
+    # Fetch permission names
+    perms=$(curl -s -H "Authorization: Bearer ${API_TOKEN}" "${JFROG_URL}/api/v2/security/permissions" | grep -o '"name" *: *"[^"]*"' | sed 's/.*: *"//;s/"//')
+
+    admin_groups=""
+    non_admin_groups=""
+
+    for perm_name in $perms; do
+        perm_detail=$(curl -s -H "Authorization: Bearer ${API_TOKEN}" "${JFROG_URL}/api/v2/security/permissions/${perm_name}")
+
+        # Check if the permission applies to this repo
+        echo "$perm_detail" | grep -q "\"repositories\" *: *\[.*${repo_key}.*\]" || continue
+
+        # Extract all group names from the permission
+        groups=$(echo "$perm_detail" | grep -o '"groups" *: *{[^}]*}' | sed 's/.*{//;s/}//' | tr ',' '\n' | grep ':' | awk -F: '{gsub(/"/,"",$1); print $1}' | sort -u)
+
+        for grp in $groups; do
+            # Extract action list for that group
+            actions=$(echo "$perm_detail" | grep -A3 "\"${grp}\"" | grep -o '"actions" *: *\[[^]]*\]' | sed 's/.*\[//;s/\]//;s/"//g')
+            if echo "$actions" | grep -q "MANAGE"; then
+                admin_groups+="${grp},"
+            else
+                non_admin_groups+="${grp},"
+            fi
+        done
+    done
+
+    # Clean up trailing commas
+    admin_groups=${admin_groups%,}
+    non_admin_groups=${non_admin_groups%,}
+    [ -z "$admin_groups" ] && admin_groups="None"
+    [ -z "$non_admin_groups" ] && non_admin_groups="None"
+
+    echo "${repo_key},${repo_name},${admin_groups},${non_admin_groups}" >> "$OUTPUT_FILE"
+done
+
+echo "✅ Report generated successfully: $OUTPUT_FILE"
