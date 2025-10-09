@@ -1,0 +1,71 @@
+#!/bin/bash
+# --------------------------------------------------------------------
+# Script: xenserver_pool_report.sh
+# Purpose: Generate CSV report for XenServer pool (CPU, Memory, VMs)
+# --------------------------------------------------------------------
+
+if [ $# -lt 1 ]; then
+  echo "Usage: $0 <xenserver-host> [username]"
+  exit 1
+fi
+
+HOST="$1"
+USER="${2:-root}"
+OUTPUT_FILE="xenserver_pool_report.csv"
+REMOTE_FILE="/tmp/xenserver_pool_report.csv"
+
+echo "🔗 Connecting to XenServer: $HOST as $USER..."
+echo "Generating report... please wait."
+
+# Run everything remotely and write CSV to /tmp/xenserver_pool_report.csv
+ssh -o BatchMode=yes -o ConnectTimeout=10 ${USER}@${HOST} <<'REMOTE_SCRIPT'
+#!/bin/bash
+set -e
+source /etc/profile 2>/dev/null || true
+XE_BIN=$(command -v xe || echo "/opt/xensource/bin/xe")
+OUTPUT_FILE="/tmp/xenserver_pool_report.csv"
+
+# Fetch pool info
+POOL_UUID=$($XE_BIN pool-list --minimal)
+if [ -n "$POOL_UUID" ]; then
+    POOL_NAME=$($XE_BIN pool-param-get uuid=$POOL_UUID param-name=name-label)
+else
+    POOL_NAME="Standalone Host (No Pool)"
+fi
+
+# Get total number of hosts
+TOTAL_HOSTS=$($XE_BIN host-list --minimal | tr , '\n' | wc -l)
+
+# CSV Header
+echo "Pool Name,Total Hosts,Host Name,CPU Model,CPU Count,Total Memory (GB),Free Memory (GB),Running VMs" > "$OUTPUT_FILE"
+
+# Iterate through each host
+for host in $($XE_BIN host-list --minimal | tr , ' '); do
+    NAME=$($XE_BIN host-param-get uuid=$host param-name=name-label)
+    CPU_MODEL=$($XE_BIN host-cpu-info host-uuid=$host | grep "model name (cpu" | head -n1 | cut -d: -f2- | sed 's/^ *//')
+    CPU_COUNT=$($XE_BIN host-cpu-info host-uuid=$host | grep -c "model name (cpu")
+    TOTAL_MEM=$($XE_BIN host-param-get uuid=$host param-name=memory-total)
+    FREE_MEM=$($XE_BIN host-param-get uuid=$host param-name=memory-free)
+    VM_COUNT=$($XE_BIN vm-list resident-on=$host is-control-domain=false --minimal | tr , '\n' | wc -l)
+
+    TOTAL_MEM_GB=$(awk "BEGIN {printf \"%.2f\", $TOTAL_MEM/1024/1024/1024}")
+    FREE_MEM_GB=$(awk "BEGIN {printf \"%.2f\", $FREE_MEM/1024/1024/1024}")
+
+    echo "$POOL_NAME,$TOTAL_HOSTS,$NAME,$CPU_MODEL,$CPU_COUNT,$TOTAL_MEM_GB,$FREE_MEM_GB,$VM_COUNT" >> "$OUTPUT_FILE"
+done
+
+# Add total VM summary
+TOTAL_VMS=$($XE_BIN vm-list is-control-domain=false --minimal | tr , '\n' | wc -l)
+echo "$POOL_NAME,$TOTAL_HOSTS,Total,,,,,$TOTAL_VMS" >> "$OUTPUT_FILE"
+REMOTE_SCRIPT
+
+# Copy CSV from remote to local
+scp -q ${USER}@${HOST}:${REMOTE_FILE} "./${OUTPUT_FILE}" 2>/dev/null
+
+if [ -f "./${OUTPUT_FILE}" ]; then
+  echo "✅ Report generated successfully!"
+  echo "📄 Saved as: $(pwd)/${OUTPUT_FILE}"
+else
+  echo "❌ Report not found. Try running manually:"
+  echo "ssh ${USER}@${HOST} '/opt/xensource/bin/xe host-list'"
+fi
