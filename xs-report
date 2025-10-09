@@ -1,0 +1,64 @@
+#!/bin/bash
+# --------------------------------------------------------------------
+# Script: xenserver_pool_report.sh
+# Purpose: Collect CPU, Memory, Model Name, and VM details from all XenServer hosts in a pool
+# Output: xenserver_pool_report.csv
+# Usage: ./xenserver_pool_report.sh <xenserver-host> [username]
+# Example: ./xenserver_pool_report.sh xenmaster.example.com root
+# --------------------------------------------------------------------
+
+# Check input arguments
+if [ $# -lt 1 ]; then
+  echo "Usage: $0 <xenserver-host> [username]"
+  echo "Example: $0 xenmaster.example.com root"
+  exit 1
+fi
+
+HOST="$1"
+USER="${2:-root}"   # default username is root
+OUTPUT_FILE="xenserver_pool_report.csv"
+
+echo "Connecting to XenServer host: $HOST as $USER..."
+echo "Generating report... please wait."
+
+# Run all xe commands remotely via SSH
+ssh -o BatchMode=yes -o ConnectTimeout=10 ${USER}@${HOST} bash << 'EOF' > /tmp/xen_temp_report.csv
+OUTPUT_FILE="/tmp/xenserver_pool_report.csv"
+
+# Write CSV header
+echo "Host Name,CPU Model,CPU Count,Total Memory (GB),Free Memory (GB),Running VMs,Uptime (Days)" > "\$OUTPUT_FILE"
+
+# Loop through all hosts in the pool
+for host in \$(xe host-list --minimal | tr , ' '); do
+    name=\$(xe host-param-get uuid=\$host param-name=name-label)
+    cpu_info=\$(xe host-param-get uuid=\$host param-name=cpu-info)
+    cpu_model=\$(echo "\$cpu_info" | grep "modelname:" | head -n1 | cut -d: -f2- | sed 's/^ *//')
+    cpu_count=\$(echo "\$cpu_info" | grep -o "cpu_count: [0-9]*" | awk '{print \$2}')
+    total_mem=\$(xe host-param-get uuid=\$host param-name=memory-total)
+    free_mem=\$(xe host-param-get uuid=\$host param-name=memory-free)
+    vm_count=\$(xe vm-list resident-on=\$host is-control-domain=false --minimal | tr , '\n' | wc -l)
+    uptime_seconds=\$(xe host-param-get uuid=\$host param-name=uptime)
+    uptime_days=\$(awk "BEGIN {printf \"%.2f\", \$uptime_seconds/86400}")
+
+    # Convert bytes to GB
+    total_mem_gb=\$(awk "BEGIN {printf \"%.2f\", \$total_mem/1024/1024/1024}")
+    free_mem_gb=\$(awk "BEGIN {printf \"%.2f\", \$free_mem/1024/1024/1024}")
+
+    echo "\$name,\$cpu_model,\$cpu_count,\$total_mem_gb,\$free_mem_gb,\$vm_count,\$uptime_days" >> "\$OUTPUT_FILE"
+done
+
+# Add total VM count
+total_vms=\$(xe vm-list is-control-domain=false --minimal | tr , '\n' | wc -l)
+echo "Total,,,,,$total_vms," >> "\$OUTPUT_FILE"
+cat "\$OUTPUT_FILE"
+EOF
+
+# Copy report back to local system
+scp -q ${USER}@${HOST}:/tmp/xen_temp_report.csv "./${OUTPUT_FILE}" >/dev/null 2>&1
+
+if [ -f "./${OUTPUT_FILE}" ]; then
+  echo "✅ XenServer Pool Report generated successfully!"
+  echo "📄 File: $(pwd)/${OUTPUT_FILE}"
+else
+  echo "❌ Failed to retrieve report. Please check SSH access or xe permissions."
+fi
