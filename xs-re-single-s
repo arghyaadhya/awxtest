@@ -33,7 +33,7 @@ for uuid in $hosts; do
   name=$(xe host-param-get uuid="$uuid" param-name=name-label)
 
   # ✅ Universal CPU count
-  cpu=$(xe host-cpu-info host-uuid="$uuid" --minimal | tr ',' '\n' | wc -l)
+  cpu=$(xe host-cpu-info host-uuid="$uuid" --minimal)
 
   # ✅ Memory
   mem_bytes=$(xe host-param-get uuid="$uuid" param-name=memory-total)
