@@ -1,0 +1,118 @@
+#!/bin/bash
+# ---------------------------------------------------------------------
+# Citrix XenServer / Hypervisor Pool Resource Summary (v4)
+# ---------------------------------------------------------------------
+# ✅ Shows pool name per host
+# ✅ CPU count (no tr/wc)
+# ✅ Used, Free, and Total memory per host
+# ✅ Running VM count per host
+# ✅ Calculates how many 16GB VMs can fit in total pool memory
+# ✅ Skips DVD/ISO/udev/0-size SRs
+# ---------------------------------------------------------------------
+
+# --- Check xe CLI ---
+if ! command -v xe &>/dev/null; then
+  echo "Error: xe command not found. Run this on a XenServer host (preferably the pool master)."
+  exit 1
+fi
+
+# --- Get pool name ---
+pool_name=$(xe pool-list --minimal 2>/dev/null)
+if [[ -z "$pool_name" ]]; then
+  pool_name="Standalone Host (No Pool)"
+fi
+
+echo "============================================================"
+echo " Citrix XenServer Pool Resource Summary"
+echo " Pool Name : $pool_name"
+echo "============================================================"
+echo
+
+# --- Initialize totals ---
+total_cpu=0
+total_mem_total=0
+total_mem_used=0
+total_mem_free=0
+total_vms=0
+
+printf "%-25s %-25s %-8s %-10s %-12s %-12s %-12s %-8s\n" \
+  "POOL NAME" "HOST NAME" "CPU" "VMs" "USED(GB)" "FREE(GB)" "TOTAL(GB)" "16GB-VM"
+echo "---------------------------------------------------------------------------------------------------------------"
+
+# --- Loop through hosts ---
+for uuid in $(xe host-list --minimal | tr ',' ' '); do
+  host_name=$(xe host-param-get uuid="$uuid" param-name=name-label)
+
+  # ✅ CPU count (no tr/wc)
+  cpu_list=$(xe host-cpu-info host-uuid="$uuid" --minimal 2>/dev/null)
+  if [[ -n "$cpu_list" ]]; then
+    cpu_count=$(( ${#cpu_list//[^,]/} + 1 ))
+  else
+    cpu_count=0
+  fi
+
+  # ✅ Memory stats
+  mem_total_bytes=$(xe host-param-get uuid="$uuid" param-name=memory-total)
+  mem_free_bytes=$(xe host-param-get uuid="$uuid" param-name=memory-free)
+  mem_total_gb=$((mem_total_bytes/1024/1024/1024))
+  mem_free_gb=$((mem_free_bytes/1024/1024/1024))
+  mem_used_gb=$((mem_total_gb - mem_free_gb))
+
+  # ✅ Running VM count
+  vm_count=$(xe vm-list resident-on="$uuid" power-state=running --minimal 2>/dev/null | grep -o ',' | wc -l)
+  if [[ -n "$(xe vm-list resident-on="$uuid" power-state=running --minimal)" ]]; then
+    vm_count=$((vm_count + 1))
+  else
+    vm_count=0
+  fi
+
+  # ✅ 16GB VM capacity per host
+  vm16_cap=$((mem_total_gb / 16))
+
+  printf "%-25s %-25s %-8s %-10s %-12s %-12s %-12s %-8s\n" \
+    "$pool_name" "$host_name" "$cpu_count" "$vm_count" "$mem_used_gb" "$mem_free_gb" "$mem_total_gb" "$vm16_cap"
+
+  total_cpu=$((total_cpu + cpu_count))
+  total_mem_total=$((total_mem_total + mem_total_gb))
+  total_mem_used=$((total_mem_used + mem_used_gb))
+  total_mem_free=$((total_mem_free + mem_free_gb))
+  total_vms=$((total_vms + vm_count))
+done
+
+echo "---------------------------------------------------------------------------------------------------------------"
+total_16gb=$((total_mem_total / 16))
+printf "%-25s %-25s %-8s %-10s %-12s %-12s %-12s %-8s\n" \
+  "TOTAL" "" "$total_cpu" "$total_vms" "$total_mem_used" "$total_mem_free" "$total_mem_total" "$total_16gb"
+echo "---------------------------------------------------------------------------------------------------------------"
+echo " Total 16GB VM Capacity Across Pool: $total_16gb VMs"
+echo
+
+# --- Storage summary ---
+echo "============================================================"
+echo " Storage Repositories Summary (Excluding DVD & 0-size SRs)"
+echo "============================================================"
+printf "%-35s %-12s %-12s %-12s %-15s\n" \
+  "SR NAME" "TOTAL(GB)" "USED(GB)" "FREE(GB)" "TYPE"
+echo "--------------------------------------------------------------------------"
+
+for sr_uuid in $(xe sr-list --minimal | tr ',' ' '); do
+  sr_name=$(xe sr-param-get uuid="$sr_uuid" param-name=name-label)
+  sr_total=$(xe sr-param-get uuid="$sr_uuid" param-name=physical-size)
+  sr_used=$(xe sr-param-get uuid="$sr_uuid" param-name=physical-utilisation)
+  sr_type=$(xe sr-param-get uuid="$sr_uuid" param-name=type)
+
+  # Skip SRs that are ISO/DVD/udev or 0-size
+  if [[ "$sr_type" == "iso" ]] || [[ "$sr_type" == "udev" ]] || [[ "$sr_total" -eq 0 ]]; then
+    continue
+  fi
+
+  total_gb=$((sr_total/1024/1024/1024))
+  used_gb=$((sr_used/1024/1024/1024))
+  free_gb=$((total_gb - used_gb))
+
+  printf "%-35s %-12s %-12s %-12s %-15s\n" \
+    "$sr_name" "$total_gb" "$used_gb" "$free_gb" "$sr_type"
+done
+
+echo "--------------------------------------------------------------------------"
+echo " Summary completed successfully."
