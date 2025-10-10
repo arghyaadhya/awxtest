@@ -16,7 +16,7 @@ timestamp=$(date +"%Y-%m-%d_%H-%M")
 csv_file="/tmp/xenpool_summary_${timestamp}.csv"
 
 # --- Get pool name ---
-pool_name=$(xe pool-list --minimal 2>/dev/null)
+pool_name=$(xe pool-list | grep "name-label ( RW):" | awk '{print $4}')
 [[ -z "$pool_name" ]] && pool_name="Standalone Host (No Pool)"
 
 echo "============================================================"
@@ -56,12 +56,12 @@ for uuid in $hosts; do
   # ✅ Memory details
   mem_total_bytes=$(xe host-param-get uuid="$uuid" param-name=memory-total)
   mem_free_bytes=$(xe host-param-get uuid="$uuid" param-name=memory-free)
-  ctrl_mem_bytes=$(xe host-param-get uuid="$uuid" param-name=control-domain-memory 2>/dev/null)
+  ctrl_mem_bytes=$(xl list Domain-0 | awk 'NR==2 {print $3}')
   [[ -z "$ctrl_mem_bytes" ]] && ctrl_mem_bytes=0
 
   mem_total_gb=$((mem_total_bytes/1024/1024/1024))
   mem_free_gb=$((mem_free_bytes/1024/1024/1024))
-  ctrl_mem_gb=$((ctrl_mem_bytes/1024/1024/1024))
+  ctrl_mem_gb=$((ctrl_mem_bytes/1024))
 
   # Usable memory excludes Dom0
   usable_mem_gb=$((mem_total_gb - ctrl_mem_gb))
