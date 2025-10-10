@@ -95,7 +95,7 @@ for uuid in $hosts; do
 done
 
 # --- Correct pool usable memory ---
-usable_mem_pool=$((total_mem_usable))
+usable_mem_pool=$((total_mem_usable - total_ctrl_mem))
 total_16gb_vm_cap=$((usable_mem_pool / 16))
 
 echo "----------------------------------------------------------------------------------------------------------------------------"
