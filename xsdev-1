@@ -1,0 +1,376 @@
+#!/bin/bash
+# ---------------------------------------------------------------------
+# Citrix XenServer Interactive HTML Dashboard (v7)
+# ---------------------------------------------------------------------
+# - Single page, offline HTML dashboard
+# - Site + Pool dropdowns + live search
+# - Auto-refresh every 1 hour with countdown
+# - Auto-detect new pools (reads xenpool_index_latest.csv & pool CSVs)
+# - Displays pool summary + VM-type totals + host-wise breakdown
+# ---------------------------------------------------------------------
+
+OUTPUT_DIR="/tmp/xenpool_collect_tmp"
+INDEX_FILE=$(ls -1t "${OUTPUT_DIR}"/xenpool_index_*.csv 2>/dev/null | head -n1)
+HTML_FILE="${OUTPUT_DIR}/Citrix_XenServer_Dashboard.html"
+
+if [[ -z "$INDEX_FILE" ]]; then
+  echo "❌ No index file found in $OUTPUT_DIR (expected xenpool_index_*.csv)."
+  exit 1
+fi
+
+echo "=============================================================="
+echo " Citrix XenServer Dashboard v7 (Host-wise details)"
+echo "=============================================================="
+echo "Index file : $INDEX_FILE"
+echo "Output file: $HTML_FILE"
+echo "=============================================================="
+
+# Write the HTML (embedded JS will fetch xenpool_index_latest.csv and the pool CSVs)
+cat > "$HTML_FILE" <<'HTML_EOF'
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Citrix XenServer Dashboard</title>
+<style>
+  body { font-family: Arial, sans-serif; background: #f5f8fc; color: #222; margin: 24px; }
+  h1 { color: #005eb8; margin-bottom: 4px; }
+  .controls { display:flex; flex-wrap:wrap; gap:10px; align-items:center; margin-bottom:12px; }
+  select, input[type=text] { padding: 8px; margin: 0; border-radius: 5px; border: 1px solid #ccc; }
+  #searchBox { width: 320px; }
+  .container { max-width: 1200px; margin: auto; background: #fff; padding: 18px; border-radius: 8px; box-shadow: 0 6px 18px rgba(0,0,0,0.06); }
+  table { border-collapse: collapse; width: 100%; margin-top: 14px; background: #fff; }
+  th, td { border: 1px solid #e0e0e0; padding: 8px 10px; text-align:left; font-size:14px; }
+  th { background: #007bff; color: #fff; }
+  tr:nth-child(even) { background: #fafafa; }
+  .chart-container { display:flex; flex-wrap:wrap; gap:14px; margin-top: 12px; align-items:center; }
+  canvas { background: white; border-radius:8px; box-shadow: 0 2px 6px rgba(0,0,0,0.04); }
+  #timer { font-size:13px; color:#666; margin-left: auto; }
+  .muted { color:#666; font-size:13px; }
+  .host-table th { font-size:13px; }
+  .small { font-size:13px; padding:6px 8px; }
+  a { color:#007bff; text-decoration:none; }
+  .no-data { color:#777; padding:12px 0; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>Citrix XenServer Resource Dashboard</h1>
+  <div style="display:flex; align-items:center; gap:12px;">
+    <div class="muted">Generated: <span id="genTime"></span></div>
+    <div id="timer" style="margin-left:12px;">Next auto-refresh in 60:00 minutes</div>
+  </div>
+
+  <div class="controls" style="margin-top:12px;">
+    <label for="siteSelect"><b>Select Site:</b></label>
+    <select id="siteSelect"><option value="">-- Select Site --</option></select>
+
+    <label for="poolSelect"><b>Select Pool:</b></label>
+    <select id="poolSelect"><option value="">-- Select Pool --</option></select>
+
+    <label for="searchBox"><b>Search:</b></label>
+    <input type="text" id="searchBox" placeholder="Search site or pool...">
+
+  </div>
+
+  <div id="reportArea">
+    <div class="no-data">Select a site and pool (or use Search) to view details.</div>
+  </div>
+</div>
+
+<script>
+/* Configuration */
+const REFRESH_INTERVAL = 3600000; // 1 hour
+let countdown = 3600;
+
+/* Timer and auto-refresh */
+setInterval(() => {
+  countdown--;
+  const mins = String(Math.floor(countdown / 60)).padStart(2,'0');
+  const secs = String(countdown % 60).padStart(2,'0');
+  document.getElementById('timer').innerText = "Next auto-refresh in " + mins + ":" + secs + " minutes";
+}, 1000);
+setTimeout(() => location.reload(), REFRESH_INTERVAL);
+
+/* Utility: simple CSV parse into array of arrays */
+function parseCSV(text) {
+  const lines = text.split(/\r?\n/).filter(Boolean);
+  return lines.map(line => {
+    // naive split by comma (CSV contents from our generator are simple)
+    return line.split(',').map(c => c.trim());
+  });
+}
+
+/* Load pool index and pool CSVs, parse host lines + summaries */
+async function loadData() {
+  // fetch the latest index file (dashboard generator copies latest to xenpool_index_latest.csv)
+  const idxResp = await fetch('xenpool_index_latest.csv?_=' + Date.now()).catch(()=>null);
+  if (!idxResp || !idxResp.ok) return [];
+
+  const idxText = await idxResp.text();
+  const indexRows = parseCSV(idxText).filter(r => r[0] && r[0] !== 'POOL NAME');
+
+  const results = [];
+  for (const row of indexRows) {
+    const pool_name = row[0];
+    const csv_path = row[2];
+
+    try {
+      const resp = await fetch(csv_path + '?_=' + Date.now()).catch(()=>null);
+      if (!resp || !resp.ok) continue;
+      const txt = await resp.text();
+      const lines = txt.split(/\r?\n/);
+
+      // defaults
+      const entry = {
+        site: (pool_name.match(/^AA[0-9]{2}/) || ['UNKNOWN'])[0],
+        pool: (pool_name.match(/CTX_[0-9]+/) || [pool_name])[0],
+        csv: csv_path,
+        // capacity + summaries
+        cpu: 0, mem_total: 0, mem_used: 0, mem_usable: 0,
+        sr_total: 0, sr_used: 0, sr_free: 0,
+        vms: 0, vm_capacity: 0,
+        vm32: 0, vm16_abcvde: 0, vm16_abcvder: 0,
+        hosts: []
+      };
+
+      let inHostSection = false;
+      let inPoolSummary = false;
+      let inCapSummary = false;
+
+      for (const line of lines) {
+        if (!line) {
+          // blank line ends current sections
+          inHostSection = false;
+          inPoolSummary = false;
+          inCapSummary = false;
+          continue;
+        }
+        if (line.startsWith('POOL NAME,HOST NAME')) { inHostSection = true; continue; }
+        if (line.startsWith('POOL SUMMARY')) { inHostSection = false; inPoolSummary = true; continue; }
+        if (line.startsWith('POOL CAPACITY SUMMARY')) { inCapSummary = true; inPoolSummary = false; continue; }
+        if (line.startsWith('STORAGE REPOSITORIES')) { inCapSummary = false; continue; }
+
+        const parts = line.split(',').map(p => p.trim());
+        if (inHostSection) {
+          // Expect host lines with at least 11 columns (as produced by collector)
+          // POOL NAME,HOST NAME,CPU,CTRL_MEM(GB),USED(GB),FREE(GB),TOTAL(GB),RUNNING_VM,VM_32GB_COUNT,VM_16GB_ABCVDE_COUNT,VM_16GB_ABCVDER_COUNT
+          if (parts.length >= 11) {
+            const hostObj = {
+              host: parts[1] || '',
+              cpu: Number(parts[2] || 0),
+              ctrl_mem: Number(parts[3] || 0),
+              used: Number(parts[4] || 0),
+              free: Number(parts[5] || 0),
+              total: Number(parts[6] || 0),
+              running: Number(parts[7] || 0),
+              vm32: Number(parts[8] || 0),
+              vm16a: Number(parts[9] || 0),
+              vm16r: Number(parts[10] || 0)
+            };
+            entry.hosts.push(hostObj);
+          }
+        } else if (inPoolSummary) {
+          const k = parts[0] || '';
+          const v = parts[1] ? parts[1].trim() : '';
+          if (!v) continue;
+          if (k.includes('Running VMs')) entry.vms = Number(v);
+          if (k.includes('Usable Memory')) entry.mem_usable = Number(v);
+          if (k.includes('16GB VM Capacity')) entry.vm_capacity = Number(v);
+          if (k.match(/32GB VMs/i)) entry.vm32 = Number(v);
+          if (k.match(/16GB ABCVDE VMs/i)) entry.vm16_abcvde = Number(v);
+          if (k.match(/16GB ABCVDER VMs/i)) entry.vm16_abcvder = Number(v);
+        } else if (inCapSummary) {
+          const k = parts[0] || '';
+          const v = parts[1] ? parts[1].trim() : '';
+          if (!v) continue;
+          if (k.includes('CPU Cores')) entry.cpu = Number(v);
+          if (k.includes('Memory Total')) entry.mem_total = Number(v);
+          if (k.includes('Memory Used')) entry.mem_used = Number(v);
+          if (k.includes('Usable Memory')) entry.mem_usable = Number(v);
+          if (k.includes('SR Total')) entry.sr_total = Number(v);
+          if (k.includes('SR Used')) entry.sr_used = Number(v);
+          if (k.includes('SR Free')) entry.sr_free = Number(v);
+        }
+      } // end lines loop
+
+      // If host-level vm totals available, override pool-level totals if pool summary missing
+      if ((!entry.vm32 || !entry.vm16_abcvde || !entry.vm16_abcvder) && entry.hosts.length) {
+        // sum across hosts
+        entry.vm32 = entry.hosts.reduce((s,h) => s + (h.vm32||0), 0);
+        entry.vm16_abcvde = entry.hosts.reduce((s,h) => s + (h.vm16a||0), 0);
+        entry.vm16_abcvder = entry.hosts.reduce((s,h) => s + (h.vm16r||0), 0);
+      }
+
+      results.push(entry);
+    } catch (e) {
+      console.warn('Failed parsing CSV for', pool_name, e);
+    }
+  } // end index loop
+
+  return results;
+}
+
+/* Draw a basic pie on a canvas context */
+function drawPie(ctx, usedPct, title, color) {
+  const usedAngle = Math.max(0, Math.min(100, usedPct)) / 100 * 2 * Math.PI;
+  ctx.clearRect(0, 0, 300, 300);
+  // used slice
+  ctx.beginPath();
+  ctx.moveTo(150,150);
+  ctx.arc(150,150,100,0,usedAngle,false);
+  ctx.fillStyle = color;
+  ctx.fill();
+  // free slice
+  ctx.beginPath();
+  ctx.moveTo(150,150);
+  ctx.arc(150,150,100,usedAngle,2*Math.PI,false);
+  ctx.fillStyle = '#e5e5e5';
+  ctx.fill();
+  // label
+  ctx.font = '14px Arial';
+  ctx.fillStyle = '#222';
+  ctx.textAlign = 'center';
+  ctx.fillText(`${title} (${usedPct}% used)`, 150, 182);
+}
+
+/* Populate dropdowns */
+function populateSites(data) {
+  const siteSel = document.getElementById('siteSelect');
+  siteSel.innerHTML = '<option value="">-- Select Site --</option>';
+  const sites = [...new Set(data.map(d => d.site))].sort();
+  sites.forEach(s => {
+    const o = document.createElement('option'); o.value = s; o.textContent = s; siteSel.appendChild(o);
+  });
+}
+
+/* Populate pools for selected site */
+function populatePools(data) {
+  const site = document.getElementById('siteSelect').value;
+  const poolSel = document.getElementById('poolSelect');
+  poolSel.innerHTML = '<option value="">-- Select Pool --</option>';
+  data.filter(d => d.site === site).forEach(d => {
+    const o = document.createElement('option'); o.value = d.pool; o.textContent = d.pool; poolSel.appendChild(o);
+  });
+  document.getElementById('reportArea').innerHTML = '<div class="no-data">Select a pool to view details.</div>';
+}
+
+/* Render report for selected pool */
+function showReport(data, site, pool) {
+  const entry = data.find(d => d.site === site && d.pool === pool);
+  const area = document.getElementById('reportArea');
+  if (!entry) { area.innerHTML = '<div class="no-data">No data for selection.</div>'; return; }
+
+  // safe numbers
+  const cpu = entry.cpu || 0;
+  const mem_total = entry.mem_total || 0;
+  const mem_used = entry.mem_used || 0;
+  const sr_total = entry.sr_total || 0;
+  const sr_used = entry.sr_used || 0;
+  const vms = entry.vms || 0;
+  const vm_capacity = entry.vm_capacity || 0;
+  const vm32 = entry.vm32 || 0;
+  const vm16a = entry.vm16_abcvde || 0;
+  const vm16r = entry.vm16_abcvder || 0;
+
+  const mem_used_pct = mem_total ? ((mem_used / mem_total) * 100).toFixed(1) : 0;
+  const sr_used_pct = sr_total ? ((sr_used / sr_total) * 100).toFixed(1) : 0;
+  const vm_used_pct = vm_capacity ? ((vms / vm_capacity) * 100).toFixed(1) : 0;
+
+  let html = `
+    <h2>Site: ${site} &nbsp;|&nbsp; Pool: ${pool}</h2>
+    <table>
+      <tr><th>Metric</th><th>Value</th></tr>
+      <tr><td>CPU Cores</td><td>${cpu}</td></tr>
+      <tr><td>Memory Total (GB)</td><td>${mem_total}</td></tr>
+      <tr><td>Memory Used (GB)</td><td>${mem_used}</td></tr>
+      <tr><td>Usable Memory (GB)</td><td>${entry.mem_usable || '-'}</td></tr>
+      <tr><td>SR Total (GB)</td><td>${sr_total}</td></tr>
+      <tr><td>SR Used (GB)</td><td>${sr_used}</td></tr>
+      <tr><td>Total Running VMs</td><td>${vms}</td></tr>
+      <tr><td>VM Capacity (16GB)</td><td>${vm_capacity}</td></tr>
+      <tr><td>Total 32GB VMs</td><td>${vm32}</td></tr>
+      <tr><td>Total 16GB ABCVDE VMs</td><td>${vm16a}</td></tr>
+      <tr><td>Total 16GB ABCVDER VMs</td><td>${vm16r}</td></tr>
+      <tr><td>CSV Report</td><td><a href="${entry.csv}" target="_blank">Open CSV</a></td></tr>
+    </table>
+
+    <div class="chart-container">
+      <canvas id="memChart" width="300" height="300"></canvas>
+      <canvas id="srChart" width="300" height="300"></canvas>
+      <canvas id="vmChart" width="300" height="300"></canvas>
+    </div>`;
+
+  // Host-wise breakdown
+  if (entry.hosts && entry.hosts.length) {
+    html += `<h3 style="margin-top:18px;">Host-wise VM Details</h3>
+      <table class="host-table">
+        <tr>
+          <th>Host Name</th><th>CPU</th><th>CtrlMem(GB)</th><th>Used(GB)</th><th>Free(GB)</th><th>Total(GB)</th>
+          <th>Running VMs</th><th>32GB VMs</th><th>16GB ABCVDE</th><th>16GB ABCVDER</th>
+        </tr>`;
+    entry.hosts.forEach(h => {
+      html += `<tr>
+        <td>${h.host}</td>
+        <td class="small">${h.cpu}</td>
+        <td class="small">${h.ctrl_mem}</td>
+        <td class="small">${h.used}</td>
+        <td class="small">${h.free}</td>
+        <td class="small">${h.total}</td>
+        <td class="small">${h.running}</td>
+        <td class="small">${h.vm32}</td>
+        <td class="small">${h.vm16a}</td>
+        <td class="small">${h.vm16r}</td>
+      </tr>`;
+    });
+    html += `</table>`;
+  }
+
+  area.innerHTML = html;
+
+  // draw charts
+  drawPie(document.getElementById('memChart').getContext('2d'), mem_used_pct, 'Memory', '#007bff');
+  drawPie(document.getElementById('srChart').getContext('2d'), sr_used_pct, 'Storage', '#28a745');
+  drawPie(document.getElementById('vmChart').getContext('2d'), vm_used_pct, 'VM Capacity', '#ff9800');
+}
+
+/* live search: select matching site/pool if found */
+function liveSearch(data, text) {
+  const q = (text || '').trim().toLowerCase();
+  if (!q) return;
+  const match = data.find(d => (d.site && d.site.toLowerCase().includes(q)) || (d.pool && d.pool.toLowerCase().includes(q)));
+  if (match) {
+    document.getElementById('siteSelect').value = match.site;
+    populatePools(data);
+    document.getElementById('poolSelect').value = match.pool;
+    showReport(data, match.site, match.pool);
+  }
+}
+
+/* Initialization */
+(async function init() {
+  document.getElementById('genTime').innerText = new Date().toLocaleString();
+  const data = await loadData();
+  window.dashboardData = data;
+  populateSites(data);
+
+  document.getElementById('siteSelect').addEventListener('change', () => populatePools(data));
+  document.getElementById('poolSelect').addEventListener('change', () => {
+    const site = document.getElementById('siteSelect').value;
+    const pool = document.getElementById('poolSelect').value;
+    showReport(data, site, pool);
+  });
+
+  document.getElementById('searchBox').addEventListener('keyup', (e) => liveSearch(data, e.target.value));
+})();
+</script>
+</body>
+</html>
+HTML_EOF
+
+# copy current index to a stable name consumed by JS
+cp -f "$INDEX_FILE" "${OUTPUT_DIR}/xenpool_index_latest.csv"
+
+echo "✅ Dashboard v7 created: $HTML_FILE"
+echo "👉 Open it in your browser (file://$HTML_FILE) or serve it via simple HTTP server."
