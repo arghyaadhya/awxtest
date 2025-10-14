@@ -1,0 +1,461 @@
+#!/usr/bin/env bash
+# build_xen_dashboard_prod.sh
+# ---------------------------------------------------------------------
+# Production-ready generator for Citrix XenServer HTML Dashboard
+# - Normalizes index CSVs to use relative CSV filenames (basename)
+# - Adds header if index missing header
+# - Produces index_filelist.txt consumed by HTML
+# - Generates a standalone HTML file that reads index_filelist.txt
+# - Places everything in OUTPUT_DIR (default /tmp/xenpool_collect_tmp)
+# ---------------------------------------------------------------------
+# Usage:
+#   ./build_xen_dashboard_prod.sh                # uses default /tmp/xenpool_collect_tmp
+#   ./build_xen_dashboard_prod.sh /path/to/dir   # custom directory
+# After running:
+#   cd /path/to/dir
+#   python3 -m http.server 8080
+#   Open: http://localhost:8080/Citrix_XenServer_Dashboard_prod.html
+# ---------------------------------------------------------------------
+
+set -euo pipefail
+IFS=$'\n\t'
+
+# ---------- Config ----------
+OUTPUT_DIR="${1:-/tmp/xenpool_collect_tmp}"
+HTML_FILE="${OUTPUT_DIR}/Citrix_XenServer_Dashboard_prod.html"
+FILELIST="${OUTPUT_DIR}/index_filelist.txt"
+NORMALIZED_PREFIX="xenpool_index_norm_"
+LOG="/tmp/build_xen_dashboard_prod.log"
+REFRESH_MINUTES=60
+# ----------------------------
+
+mkdir -p "$OUTPUT_DIR"
+: > "$LOG"
+
+echo "[$(date +%Y-%m-%d_%H:%M:%S)] Starting dashboard build" | tee -a "$LOG"
+
+# Find all raw index files
+mapfile -t RAW_INDEXES < <(ls -1t "${OUTPUT_DIR}"/xenpool_index_*.csv 2>/dev/null || true)
+
+if [[ ${#RAW_INDEXES[@]} -eq 0 ]]; then
+  echo "No xenpool_index_*.csv files found in ${OUTPUT_DIR}. Nothing to do." | tee -a "$LOG"
+  exit 1
+fi
+
+echo "Found ${#RAW_INDEXES[@]} index file(s)." | tee -a "$LOG"
+
+# Normalize each index: ensure header, convert absolute CSV paths to basenames,
+# write normalized files xenpool_index_norm_<timestamp>_<n>.csv
+NORMALIZED_FILES=()
+n=0
+for idx in "${RAW_INDEXES[@]}"; do
+  ((n++))
+  # Use file timestamp (mtime) in name for stable ordering
+  file_mtime=$(date -r "$idx" +%Y-%m-%d_%H-%M-%S 2>/dev/null || date +%Y-%m-%d_%H-%M-%S)
+  norm_name="${NORMALIZED_PREFIX}${file_mtime}_${n}.csv"
+  norm_path="${OUTPUT_DIR}/${norm_name}"
+
+  echo "Normalizing: $idx  ->  $norm_name" | tee -a "$LOG"
+
+  # Read lines
+  mapfile -t lines < "$idx"
+
+  # If first line doesn't look like a header (contains 'POOL' 'NAME' or 'CSV'), add header
+  first="${lines[0]:-}"
+  header_needed=0
+  if [[ ! "$first" =~ [Pp][Oo][Oo][Ll].*[Nn][Aa][Mm][Ee] ]] && [[ ! "$first" =~ [Cc][Ss][Vv] ]]; then
+    header_needed=1
+  fi
+
+  {
+    if [[ $header_needed -eq 1 ]]; then
+      echo "POOL NAME,SERVER,CSV FILE"
+    fi
+
+    # Process each line: take first 3 fields, normalize the CSV file path to basename
+    for l in "${lines[@]}"; do
+      # ignore empty lines
+      [[ -z "${l//[[:space:]]/}" ]] && continue
+      # split by first two commas (we expect 3 fields), but be flexible
+      # Use awk to safely parse first 3 fields
+      pool_name=$(awk -F, '{print $1}' <<< "$l" | sed 's/^[ \t]*//;s/[ \t]*$//')
+      server_field=$(awk -F, '{print $2}' <<< "$l" | sed 's/^[ \t]*//;s/[ \t]*$//')
+      csv_field=$(awk -F, '{ $1=""; $2=""; sub(/^,/, ""); sub(/^,/, ""); print $0 }' <<< "$l" | sed 's/^[ \t]*//;s/[ \t]*$//')
+      # If csv_field contains commas (unlikely), keep as-is; otherwise normalize
+      if [[ -z "$csv_field" ]]; then
+        # if entry has only two fields
+        echo "${pool_name},${server_field},"
+      else
+        # extract basename (remove any directory prefixes)
+        csv_file=$(basename "$csv_field")
+        # if the file does not exist in OUTPUT_DIR, attempt to find it (maybe with a different timestamp suffix)
+        if [[ ! -f "${OUTPUT_DIR}/${csv_file}" ]]; then
+          # attempt to find a matching file by prefix
+          prefix="${csv_file%.*}"
+          match=$(ls -1 "${OUTPUT_DIR}/${prefix}"* 2>/dev/null | head -n1 || true)
+          if [[ -n "$match" ]]; then
+            csv_file=$(basename "$match")
+            echo "  -> resolved $csv_field to $csv_file" | tee -a "$LOG"
+          else
+            # leave basename as-is; it may still be available relative later
+            echo "  -> WARNING: ${csv_file} missing in ${OUTPUT_DIR}" | tee -a "$LOG"
+          fi
+        fi
+        echo "${pool_name},${server_field},${csv_file}"
+      fi
+    done
+  } > "$norm_path"
+
+  NORMALIZED_FILES+=("$norm_path")
+done
+
+# Write index_filelist.txt with normalized filenames (relative basenames)
+: > "$FILELIST"
+for nf in "${NORMALIZED_FILES[@]}"; do
+  echo "$(basename "$nf")" >> "$FILELIST"
+done
+
+echo "Normalized index files written. index_filelist.txt created with ${#NORMALIZED_FILES[@]} entries." | tee -a "$LOG"
+
+# Generate the production HTML (safe, supports header/no-header)
+cat > "$HTML_FILE" <<'HTML'
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Citrix XenServer Dashboard — Production</title>
+<style>
+body{font-family:Arial,Helvetica,sans-serif;background:#f5f8fc;color:#222;margin:20px;}
+.container{max-width:1200px;margin:auto;background:#fff;padding:18px;border-radius:8px;box-shadow:0 6px 18px rgba(0,0,0,0.06);}
+h1{color:#005eb8;margin:0 0 8px 0;}
+.controls{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin:12px 0;}
+select,input[type=text]{padding:8px;border-radius:5px;border:1px solid #ccc;}
+#searchBox{width:300px;}
+table{border-collapse:collapse;width:100%;margin-top:14px;background:#fff;}
+th,td{border:1px solid #e6e6e6;padding:8px;text-align:left;font-size:14px;}
+th{background:#007bff;color:#fff;}
+tr:nth-child(even){background:#fafafa;}
+.chart-container{display:flex;flex-wrap:wrap;gap:14px;margin-top:12px;}
+canvas{background:white;border-radius:8px;box-shadow:0 2px 6px rgba(0,0,0,0.04);}
+.small{font-size:13px;padding:4px 6px;}
+.no-data{color:#666;padding:12px;}
+.muted{color:#666;font-size:13px;}
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>Citrix XenServer Dashboard (Production)</h1>
+  <div style="display:flex;align-items:center;gap:12px;">
+    <div class="muted">Generated: <span id="genTime"></span></div>
+    <div id="timer" class="muted" style="margin-left:auto;">Next auto-refresh in 60:00 minutes</div>
+  </div>
+
+  <div class="controls">
+    <label><b>Date:</b></label>
+    <select id="dateSelect"><option value="">-- Select Date --</option></select>
+
+    <label><b>Site:</b></label>
+    <select id="siteSelect"><option value="">-- Select Site --</option></select>
+
+    <label><b>Pool:</b></label>
+    <select id="poolSelect"><option value="">-- Select Pool --</option></select>
+
+    <label><b>Search:</b></label>
+    <input id="searchBox" type="text" placeholder="type to search site or pool..." />
+  </div>
+
+  <div id="reportArea"><div class="no-data">Select date, site and pool (or use Search) to view report.</div></div>
+</div>
+
+<script>
+const REFRESH_INTERVAL_MS = (60 * 60 * 1000); // 1 hour
+let countdown = 60 * 60;
+document.getElementById('genTime').innerText = new Date().toLocaleString();
+
+setInterval(()=>{
+  countdown--;
+  const mm = String(Math.floor(countdown/60)).padStart(2,'0');
+  const ss = String(countdown%60).padStart(2,'0');
+  document.getElementById('timer').innerText = "Next auto-refresh in " + mm + ":" + ss + " minutes";
+}, 1000);
+setTimeout(()=>location.reload(), REFRESH_INTERVAL_MS);
+
+/* parse basic CSV to array of arrays (our CSVs are simple, no quotes) */
+function parseCSV(text){
+  return text.split(/\r?\n/).filter(Boolean).map(line => line.split(',').map(s => s.trim()));
+}
+
+/* load the index_filelist.txt that lives next to this HTML file */
+async function loadIndexList(){
+  try {
+    const base = location.pathname.substring(0, location.pathname.lastIndexOf('/')+1);
+    const r = await fetch(base + 'index_filelist.txt?_=' + Date.now());
+    if(!r.ok) return [];
+    const txt = await r.text();
+    return txt.split(/\r?\n/).filter(Boolean);
+  } catch(e){
+    console.warn('Failed to load index_filelist.txt', e);
+    return [];
+  }
+}
+
+/* load and normalize an index file (supports header/no-header) */
+async function loadIndex(indexFile){
+  try {
+    const base = location.pathname.substring(0, location.pathname.lastIndexOf('/')+1);
+    const r = await fetch(base + indexFile + '?_=' + Date.now());
+    if(!r.ok) return [];
+    const txt = await r.text();
+    const rows = parseCSV(txt).filter(r => r.length >= 2);
+    // detect header row (case-insensitive contains POOL and NAME)
+    let start = 0;
+    if(rows.length>0 && rows[0].join(' ').match(/POOL\s*NAME/i)){
+      start = 1;
+    }
+    // produce array [pool_name, server, csv_basename]
+    const out = [];
+    for(let i=start;i<rows.length;i++){
+      const r = rows[i];
+      const pool = r[0] || '';
+      const server = r[1] || '';
+      const csvField = r[2] || '';
+      // csv basename (in same output dir as HTML)
+      const csvBasename = csvField.includes('/') ? csvField.split('/').pop() : csvField;
+      out.push({pool, server, csv: csvBasename});
+    }
+    return out;
+  } catch(e){
+    console.warn('loadIndex error', e);
+    return [];
+  }
+}
+
+/* load one pool csv and parse content into an entry object */
+async function loadPoolCsv(csvBasename){
+  try {
+    const base = location.pathname.substring(0, location.pathname.lastIndexOf('/')+1);
+    const r = await fetch(base + csvBasename + '?_=' + Date.now());
+    if(!r.ok) return null;
+    const txt = await r.text();
+    const lines = txt.split(/\r?\n/);
+    const entry = {csv: csvBasename, hosts: []};
+
+    let inHost=false, inPoolSummary=false, inCap=false;
+    for(const l of lines){
+      if(!l){ inHost=false; inPoolSummary=false; inCap=false; continue; }
+      if(l.startsWith('POOL NAME,HOST NAME')){ inHost = true; continue; }
+      if(l.startsWith('POOL SUMMARY')){ inPoolSummary = true; continue; }
+      if(l.startsWith('POOL CAPACITY SUMMARY')){ inCap = true; continue; }
+      const parts = l.split(',').map(p => p.trim());
+      if(inHost && parts.length >= 11){
+        entry.hosts.push({
+          host: parts[1] || '',
+          cpu: Number(parts[2]||0),
+          ctrl_mem: Number(parts[3]||0),
+          used: Number(parts[4]||0),
+          free: Number(parts[5]||0),
+          total: Number(parts[6]||0),
+          running: Number(parts[7]||0),
+          vm32: Number(parts[8]||0),
+          vm16a: Number(parts[9]||0),
+          vm16r: Number(parts[10]||0)
+        });
+      } else if(inPoolSummary && parts.length >= 2){
+        const k = parts[0].toLowerCase(), v = Number(parts[1]||0);
+        if(k.includes('running vms')) entry.vms = v;
+        if(k.includes('usable memory')) entry.mem_usable = v;
+        if(k.includes('16gb vm capacity')) entry.vm_capacity = v;
+        if(k.match(/32gb vms/i)) entry.vm32 = v;
+        if(k.match(/16gb abcvde/i)) entry.vm16a = v;
+        if(k.match(/16gb abcvder/i)) entry.vm16r = v;
+      } else if(inCap && parts.length >= 2){
+        const k = parts[0].toLowerCase(), v = Number(parts[1]||0);
+        if(k.includes('cpu cores')) entry.cpu = v;
+        if(k.includes('memory total')) entry.mem_total = v;
+        if(k.includes('memory used')) entry.mem_used = v;
+        if(k.includes('sr total')) entry.sr_total = v;
+        if(k.includes('sr used')) entry.sr_used = v;
+        if(k.includes('sr free')) entry.sr_free = v;
+      }
+    }
+    // fallback: if per-host totals exist, derive pool-level counts if missing
+    if(!entry.vm32 && entry.hosts.length) entry.vm32 = entry.hosts.reduce((s,h)=>s + (h.vm32||0),0);
+    if(!entry.vm16a && entry.hosts.length) entry.vm16a = entry.hosts.reduce((s,h)=>s + (h.vm16a||0),0);
+    if(!entry.vm16r && entry.hosts.length) entry.vm16r = entry.hosts.reduce((s,h)=>s + (h.vm16r||0),0);
+    return entry;
+  } catch(e){
+    console.warn('loadPoolCsv error', e);
+    return null;
+  }
+}
+
+/* draw simple pie chart (no external libraries) */
+function drawPie(ctx, pct, title, color){
+  const usedAngle = Math.max(0, Math.min(100, pct)) / 100 * 2 * Math.PI;
+  ctx.clearRect(0,0,300,300);
+  ctx.beginPath(); ctx.moveTo(150,150); ctx.arc(150,150,100,0,usedAngle,false); ctx.fillStyle = color; ctx.fill();
+  ctx.beginPath(); ctx.moveTo(150,150); ctx.arc(150,150,100,usedAngle,2*Math.PI,false); ctx.fillStyle = '#e5e5e5'; ctx.fill();
+  ctx.font = '14px Arial'; ctx.fillStyle = '#222'; ctx.textAlign = 'center';
+  ctx.fillText(title + ' (' + pct + '%)', 150, 182);
+}
+
+/* UI helpers */
+function populateSites(data){
+  const siteSel = document.getElementById('siteSelect'); siteSel.innerHTML = '<option value="">-- Select Site --</option>';
+  const sites = [...new Set(data.map(d=>d.site||'UNKNOWN'))].sort();
+  sites.forEach(s => { const o=document.createElement('option'); o.value=s; o.textContent=s; siteSel.appendChild(o); });
+}
+function populatePools(data){
+  const site = document.getElementById('siteSelect').value;
+  const poolSel = document.getElementById('poolSelect'); poolSel.innerHTML = '<option value="">-- Select Pool --</option>';
+  data.filter(d => !site || d.site === site).forEach(p => {
+    const o=document.createElement('option'); o.value=p.pool; o.textContent=p.pool; poolSel.appendChild(o);
+  });
+}
+
+/* Show aggregated report for the selected date and site/pool */
+function showReport(data, site, pool){
+  const area = document.getElementById('reportArea');
+  const entry = data.find(d => (!site || d.site === site) && (!pool || d.pool === pool));
+  if(!entry){ area.innerHTML = '<div class="no-data">No data for selection.</div>'; return; }
+
+  const mem_total = entry.mem_total || 0;
+  const mem_used = entry.mem_used || 0;
+  const sr_total = entry.sr_total || 0;
+  const sr_used = entry.sr_used || 0;
+  const vms = entry.vms || 0;
+  const vm_capacity = entry.vm_capacity || 0;
+
+  const memPct = mem_total ? ((mem_used / mem_total) * 100).toFixed(1) : 0;
+  const srPct = sr_total ? ((sr_used / sr_total) * 100).toFixed(1) : 0;
+  const vmPct = vm_capacity ? ((vms / vm_capacity) * 100).toFixed(1) : 0;
+
+  let html = `<h2>${entry.site} | ${entry.pool} <small>${entry.date}</small></h2>
+    <table><tr><th>Metric</th><th>Value</th></tr>
+    <tr><td>CPU Cores</td><td>${entry.cpu||'-'}</td></tr>
+    <tr><td>Memory Total (GB)</td><td>${mem_total||'-'}</td></tr>
+    <tr><td>Memory Used (GB)</td><td>${mem_used||'-'}</td></tr>
+    <tr><td>Usable Memory (GB)</td><td>${entry.mem_usable||'-'}</td></tr>
+    <tr><td>SR Total (GB)</td><td>${sr_total||'-'}</td></tr>
+    <tr><td>SR Used (GB)</td><td>${sr_used||'-'}</td></tr>
+    <tr><td>Total Running VMs</td><td>${vms||'-'}</td></tr>
+    <tr><td>VM Capacity (16GB)</td><td>${vm_capacity||'-'}</td></tr>
+    <tr><td>Total 32GB VMs</td><td>${entry.vm32||0}</td></tr>
+    <tr><td>Total 16GB ABCVDE VMs</td><td>${entry.vm16a||0}</td></tr>
+    <tr><td>Total 16GB ABCVDER VMs</td><td>${entry.vm16r||0}</td></tr>
+    <tr><td>CSV</td><td><a href="${entry.csv}" target="_blank">${entry.csv}</a></td></tr>
+    </table>
+    <div class="chart-container">
+      <canvas id="memChart" width="300" height="300"></canvas>
+      <canvas id="srChart" width="300" height="300"></canvas>
+      <canvas id="vmChart" width="300" height="300"></canvas>
+    </div>`;
+
+  if(entry.hosts && entry.hosts.length){
+    html += `<h3>Host-wise Breakdown</h3>
+      <table><tr><th>Host</th><th>CPU</th><th>CtrlMem(GB)</th><th>Used(GB)</th><th>Free(GB)</th><th>Total(GB)</th>
+      <th>Running</th><th>32GB</th><th>16GB ABCVDE</th><th>16GB ABCVDER</th></tr>`;
+    entry.hosts.forEach(h=>{
+      html += `<tr><td>${h.host}</td><td>${h.cpu}</td><td>${h.ctrl_mem}</td><td>${h.used}</td><td>${h.free}</td><td>${h.total}</td>
+        <td>${h.running}</td><td>${h.vm32}</td><td>${h.vm16a}</td><td>${h.vm16r}</td></tr>`;
+    });
+    html += `</table>`;
+  }
+
+  area.innerHTML = html;
+  // draw pies
+  drawPie(document.getElementById('memChart').getContext('2d'), memPct, 'Memory', '#007bff');
+  drawPie(document.getElementById('srChart').getContext('2d'), srPct, 'Storage', '#28a745');
+  drawPie(document.getElementById('vmChart').getContext('2d'), vmPct, 'VM Capacity', '#ff9800');
+}
+
+/* Load chosen date: builds data array by reading that index's pool CSVs */
+async function loadDataForDate(indexFile){
+  const idx = await loadIndex(indexFile);
+  const data = [];
+  for(const rec of idx){
+    const pool_name = rec.pool || '';
+    const csvBasename = rec.csv || '';
+    // compute site/pool split: site = first part before underscore, pool = rest
+    let site = 'UNKNOWN', pool = pool_name;
+    if(pool_name.includes('_')){
+      const parts = pool_name.split('_'); site = parts[0]; pool = parts.slice(1).join('_');
+    }
+    const entry = await loadPoolCsv(csvBasename);
+    if(!entry) continue;
+    entry.site = site; entry.pool = pool;
+    // include date extracted from indexFile name (basename without prefix)
+    entry.date = indexFile.split('/').pop().replace(/^xenpool_index_/, '').replace(/\.csv$/,'');
+    data.push(entry);
+  }
+  return data;
+}
+
+/* UI wiring */
+(async function init(){
+  const indexFiles = await loadIndexList();
+  if(!indexFiles.length){
+    document.getElementById('reportArea').innerHTML = '<div class="no-data">No index files found. Ensure index_filelist.txt exists and is accessible.</div>';
+    return;
+  }
+  // populate date dropdown
+  const dateSel = document.getElementById('dateSelect');
+  indexFiles.forEach(f => {
+    const name = f.replace(/^.*xenpool_index_/,'').replace(/\.csv$/,'');
+    const o = document.createElement('option'); o.value = f; o.textContent = name; dateSel.appendChild(o);
+  });
+
+  let currentData = [];
+
+  dateSel.addEventListener('change', async ()=>{
+    const selected = dateSel.value;
+    if(!selected) { document.getElementById('reportArea').innerHTML = '<div class="no-data">Select a date to load data.</div>'; return; }
+    // load all pool CSVs referenced by that index
+    currentData = await loadDataForDate(selected);
+    if(!currentData.length){
+      document.getElementById('reportArea').innerHTML = '<div class="no-data">No pools found for this date (check index and CSV paths).</div>';
+      return;
+    }
+    populateSites(currentData);
+    document.getElementById('reportArea').innerHTML = '<div class="no-data">Select site and pool to view report.</div>';
+  });
+
+  document.getElementById('siteSelect').addEventListener('change', ()=> populatePools(currentData) );
+  document.getElementById('poolSelect').addEventListener('change', ()=> showReport(currentData, document.getElementById('siteSelect').value, document.getElementById('poolSelect').value) );
+  document.getElementById('searchBox').addEventListener('keyup', (e)=>{
+    const q = e.target.value.toLowerCase();
+    const match = currentData.find(d => (d.site && d.site.toLowerCase().includes(q)) || (d.pool && d.pool.toLowerCase().includes(q)));
+    if(match){
+      document.getElementById('siteSelect').value = match.site;
+      populatePools(currentData);
+      document.getElementById('poolSelect').value = match.pool;
+      showReport(currentData, match.site, match.pool);
+    }
+  });
+})();
+</script>
+</body>
+</html>
+HTML
+
+echo "HTML dashboard written to: $HTML_FILE" | tee -a "$LOG"
+echo "index_filelist.txt contains normalized index filenames:" | tee -a "$LOG"
+ls -1t "${OUTPUT_DIR}"/"${NORMALIZED_PREFIX}"*.csv | xargs -n1 basename | tee -a "$LOG"
+
+echo
+echo "✅ Build complete."
+echo "Open the dashboard by serving the directory over HTTP (recommended):"
+echo
+echo "  cd ${OUTPUT_DIR}"
+echo "  python3 -m http.server 8080"
+echo "  # then open in browser:"
+echo "  http://localhost:8080/$(basename "$HTML_FILE")"
+echo
+echo "Notes:"
+echo "- The script normalized index files to relative CSV basenames. If your collector creates pool CSVs\n  with names that differ in timestamp suffix, the script attempted to resolve them; inspect log at $LOG."
+echo "- The HTML expects the pool CSV files to be in the same directory as the HTML file."
+echo "- If you want to automate this every run, add this script to your collector's post-run step or a cron job."
+echo
+echo "Log: $LOG"
+echo "Done."
