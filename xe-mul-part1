@@ -1,0 +1,38 @@
+for vm_uuid in $(xe vm-list resident-on="$uuid" power-state=running --minimal | tr ',' ' '); do
+    # skip empty entries
+    [[ -z "$vm_uuid" ]] && continue
+
+    mem_bytes=$(xe vm-param-get uuid="$vm_uuid" param-name=memory-static-max 2>/dev/null)
+    vm_name=$(xe vm-param-get uuid="$vm_uuid" param-name=name-label 2>/dev/null)
+
+    # ensure numeric
+    if ! [[ "$mem_bytes" =~ ^[0-9]+$ ]]; then
+      # ignore if value not numeric
+      continue
+    fi
+
+    # Normalize units:
+    # - If value is large (>= 1,000,000) assume bytes -> convert to GB
+    # - If value looks like MB (>= 1000 and < 1,000,000) assume MB -> convert to GB
+    # - Otherwise treat as GB already (unlikely)
+    if (( mem_bytes >= 1000000 )); then
+      mem_gb=$(( mem_bytes / 1024 / 1024 / 1024 ))
+    elif (( mem_bytes >= 1000 )); then
+      # value in MB
+      mem_gb=$(( mem_bytes / 1024 ))
+    else
+      mem_gb=$(( mem_bytes ))
+    fi
+
+    # classify
+    if [[ "$mem_gb" -eq 32 ]]; then
+      ((vm_32gb_count++))
+    elif [[ "$mem_gb" -eq 16 ]]; then
+      # ABCVDE vs ABCVDER (case-insensitive), and ensure ABCVDE only counts when not ABCVDER
+      if echo "$vm_name" | grep -qi "ABCvDER"; then
+        ((vm_16_abcvder_count++))
+      elif echo "$vm_name" | grep -qi "ABCvDE" && ! echo "$vm_name" | grep -qi "ABCvDER"; then
+        ((vm_16_abcvde_count++))
+      fi
+    fi
+  done
