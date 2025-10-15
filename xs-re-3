@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Citrix XenServer Dashboard</title>
+<style>
+body {font-family: Arial, sans-serif; background-color:#f5f8fc; color:#222; margin:40px;}
+h1 {color:#005eb8;}
+select, button {padding:8px; margin:5px; border-radius:5px; border:1px solid #ccc;}
+button {background:#007bff; color:white; cursor:pointer;}
+button:hover {background:#0056b3;}
+table {border-collapse:collapse; width:100%; margin-top:20px; background:white;}
+th, td {border:1px solid #ccc; padding:8px; text-align:left;}
+th {background-color:#007bff; color:white;}
+tr:nth-child(even){background-color:#f2f2f2;}
+.container {max-width:1100px; margin:auto; background:#fff; padding:20px; border-radius:8px; box-shadow:0 0 10px rgba(0,0,0,0.1);}
+.chart-container {display:flex; flex-wrap:wrap; gap:30px; margin-top:30px; justify-content:center;}
+canvas {width:250px; height:250px;}
+.chart-title {text-align:center; margin-top:10px; font-weight:bold;}
+.section-title {margin-top:40px; font-size:18px; font-weight:bold; color:#005eb8;}
+#timer {font-size:14px; color:#666;}
+.ht-on {color:green; font-weight:bold;}
+.ht-off {color:red; font-weight:bold;}
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>Citrix XenServer Resource Dashboard</h1>
+  <p><b>Generated:</b> <span id="genTime"></span></p>
+  <p id="timer">Next auto-refresh in 60:00 minutes</p>
+
+  <label><b>Site:</b></label>
+  <select id="siteSelect"><option value="">-- Select Site --</option></select>
+
+  <label><b>Pool:</b></label>
+  <select id="poolSelect"><option value="">-- Select Pool --</option></select>
+
+  <label><b>Date:</b></label>
+  <select id="dateSelect"><option value="">-- Select Date --</option></select>
+
+  <button id="refreshBtn">Refresh Index</button>
+
+  <div id="reportArea"></div>
+</div>
+
+<script>
+// ===== Timer =====
+const REFRESH_INTERVAL=3600000;
+let countdown=3600;
+setInterval(()=>{countdown--;const m=String(Math.floor(countdown/60)).padStart(2,'0');const s=String(countdown%60).padStart(2,'0');
+document.getElementById('timer').innerText="Next auto-refresh in "+m+":"+s+" minutes";},1000);
+setTimeout(()=>location.reload(),REFRESH_INTERVAL);
+
+// ===== Helpers =====
+function parseCSV(text){return text.trim().split(/\r?\n/).map(l=>l.split(',').map(x=>x.trim()));}
+function normalizePath(p){if(!p)return null;return p.split('/').pop();}
+
+// ===== Get index list =====
+async function getIndexFiles(){
+  const res=await fetch("index_filelist.txt?_="+Date.now()).catch(()=>null);
+  if(!res||!res.ok)return[];
+  const txt=await res.text();
+  return txt.trim().split(/\r?\n/).filter(x=>x.length>0);
+}
+
+// ===== Load index data =====
+async function loadIndexData(indexFile){
+  const res=await fetch(indexFile+"?_="+Date.now()).catch(()=>null);
+  if(!res||!res.ok)return[];
+  const text=await res.text();
+  let lines=parseCSV(text).filter(l=>l.length>=2);
+  if(lines[0]&&lines[0][0].toUpperCase().includes("POOL NAME"))lines=lines.slice(1);
+  const data=[];
+  for(const [pool_name,,csv_pathRaw] of lines){
+    if(!csv_pathRaw)continue;
+    const csv_path=normalizePath(csv_pathRaw);
+    const parts=pool_name.trim().split('_');
+    const site=parts[0].toUpperCase();
+    const pool=parts.slice(1).join('_').toUpperCase();
+    const date=indexFile.match(/\d{4}-\d{2}-\d{2}/)[0];
+    data.push({site,pool,csv_path,indexFile,date});
+  }
+  return data;
+}
+
+// ===== Dropdowns =====
+function populateSites(data){
+  const sites=[...new Set(data.map(d=>d.site))].sort();
+  const sel=document.getElementById('siteSelect');
+  sel.innerHTML='<option value="">-- Select Site --</option>';
+  sites.forEach(s=>{const o=document.createElement('option');o.value=s;o.textContent=s;sel.appendChild(o);});
+}
+function populatePools(site,data){
+  const pools=[...new Set(data.filter(d=>d.site===site).map(d=>d.pool))];
+  const sel=document.getElementById('poolSelect');
+  sel.innerHTML='<option value="">-- Select Pool --</option>';
+  pools.forEach(p=>{const o=document.createElement('option');o.value=p;o.textContent=p;sel.appendChild(o);});
+}
+function populateDates(pool,data){
+  const dates=[...new Set(data.filter(d=>d.pool===pool).map(d=>d.date))];
+  const sel=document.getElementById('dateSelect');
+  sel.innerHTML='<option value="">-- Select Date --</option>';
+  dates.sort().forEach(dt=>{const o=document.createElement('option');o.value=dt;o.textContent=dt;sel.appendChild(o);});
+}
+
+// ===== Pie Chart =====
+function drawPie(canvas, used, total, label, color) {
+  canvas.width = 250; canvas.height = 250;
+  const ctx = canvas.getContext('2d');
+  const usedPct = total ? Math.min((used / total) * 100, 100) : 0;
+  const angle = (usedPct / 100) * 2 * Math.PI;
+  const cx = canvas.width / 2, cy = canvas.height / 2, r = 100;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.beginPath(); ctx.moveTo(cx, cy); ctx.arc(cx, cy, r, 0, 2 * Math.PI); ctx.closePath();
+  ctx.fillStyle = '#e5e5e5'; ctx.fill();
+  ctx.beginPath(); ctx.moveTo(cx, cy); ctx.arc(cx, cy, r, -Math.PI / 2, -Math.PI / 2 + angle, false); ctx.closePath();
+  ctx.fillStyle = color; ctx.fill();
+  ctx.fillStyle = '#000'; ctx.font = '16px Arial'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(label, cx, cy - 10); ctx.fillText(`${usedPct.toFixed(1)}% Used`, cx, cy + 15);
+}
+
+// ===== Report =====
+async function showReport(pool,date,allData){
+  const e=allData.filter(d=>d.pool===pool&&d.date===date).pop();
+  if(!e){document.getElementById('reportArea').innerHTML=`<p style='color:red'>No data for ${pool} on ${date}</p>`;return;}
+  const file=e.csv_path;
+  const r=await fetch(file).catch(()=>null);
+  if(!r||!r.ok){document.getElementById('reportArea').innerHTML=`<p style='color:red'>Cannot load CSV: ${file}</p>`;return;}
+  const txt=await r.text();
+  const lines=txt.split(/\r?\n/);
+
+  const hosts=[], poolSummary=[], storageRepos=[], poolCapSummary=[];
+  let section='main';
+  for(const l of lines){
+    if(!l.trim())continue;
+    if(l.startsWith('POOL SUMMARY')){section='summary';continue;}
+    if(l.startsWith('STORAGE REPOSITORIES')){section='storage';continue;}
+    if(l.startsWith('POOL CAPACITY SUMMARY')){section='capacity';continue;}
+    if(section==='main'&&l.includes(',')){
+      const f=l.split(',');
+      if(f.length>=12&&f[0]!=='POOL NAME'){
+        hosts.push({
+          host:f[1], cpu:f[2], ht:f[3], ctrl_mem:f[4],
+          used:f[5], free:f[6], total:f[7],
+          vms:f[8], vm_32:f[9], vm_16_abcvde:f[10], vm_16_abcvder:f[11]
+        });
+      }
+    } else if(section==='summary'&&l.includes(',')) poolSummary.push(l);
+    else if(section==='storage'&&l.includes(',')) storageRepos.push(l);
+    else if(section==='capacity'&&l.includes(',')) poolCapSummary.push(l);
+  }
+
+  let html=`<h2>${e.site} | ${e.pool} | ${date}</h2>`;
+
+  // --- Pool Summary ---
+  html+=`<div class='section-title'>Pool Summary</div><table><tr><th>Metric</th><th>Value</th></tr>`;
+  poolSummary.forEach(l=>{const [k,v]=l.split(',');html+=`<tr><td>${k}</td><td>${v}</td></tr>`;});
+  html+='</table>';
+
+  // --- Charts ---
+  html+=`<div class='chart-container'>
+    <div><canvas id='memChart'></canvas><div class='chart-title'>Memory</div></div>
+    <div><canvas id='srChart'></canvas><div class='chart-title'>Storage</div></div>
+    <div><canvas id='vmChart'></canvas><div class='chart-title'>VMs</div></div>
+  </div>`;
+
+  // --- Hosts ---
+  html+=`<div class='section-title'>Pool Host Details</div>
+  <table><tr><th>Host</th><th>CPU</th><th>HT Status</th><th>Ctrl Mem</th><th>Used</th><th>Free</th><th>Total</th>
+  <th>Running VMs</th><th>VM 32GB</th><th>VM 16GB ABCvDE</th><th>VM 16GB ABCvDER</th></tr>`;
+  hosts.forEach(h=>{
+    const htClass=h.ht.toUpperCase()==='ON'?'ht-on':'ht-off';
+    html+=`<tr><td>${h.host}</td><td>${h.cpu}</td><td class='${htClass}'>${h.ht}</td><td>${h.ctrl_mem}</td>
+    <td>${h.used}</td><td>${h.free}</td><td>${h.total}</td><td>${h.vms}</td><td>${h.vm_32}</td><td>${h.vm_16_abcvde}</td><td>${h.vm_16_abcvder}</td></tr>`;
+  });
+  html+='</table>';
+
+  // --- Storage Repositories ---
+  html+=`<div class='section-title'>Storage Repositories</div><table><tr><th>SR Name</th><th>Total (GB)</th><th>Used (GB)</th><th>Free (GB)</th><th>Type</th></tr>`;
+  storageRepos.forEach(l=>{const [a,b,c,d,e]=l.split(',');html+=`<tr><td>${a}</td><td>${b}</td><td>${c}</td><td>${d}</td><td>${e}</td></tr>`;});
+  html+='</table>';
+
+  // --- Pool Capacity Summary ---
+  html+=`<div class='section-title'>Pool Capacity Summary</div><table><tr><th>Metric</th><th>Total (GB)</th></tr>`;
+  poolCapSummary.forEach(l=>{const [a,b]=l.split(',');html+=`<tr><td>${a}</td><td>${b}</td></tr>`;});
+  html+='</table>';
+
+  document.getElementById('reportArea').innerHTML=html;
+
+  const memUsed=getValue(poolCapSummary,'Memory Used');
+  const memTotal=getValue(poolCapSummary,'Memory Total');
+  const srUsed=getValue(poolCapSummary,'SR Used');
+  const srTotal=getValue(poolCapSummary,'SR Total');
+  const vms=getValue(poolSummary,'Total Running VMs');
+  const vmCap=getValue(poolSummary,'16GB VM Capacity (Approx)');
+
+  drawPie(document.getElementById('memChart'),memUsed,memTotal,'Memory','#007bff');
+  drawPie(document.getElementById('srChart'),srUsed,srTotal,'Storage','#28a745');
+  drawPie(document.getElementById('vmChart'),vms,vmCap,'VMs','#ff9800');
+}
+
+function getValue(arr,key){const f=arr.find(l=>l.startsWith(key));if(!f)return 0;return +f.split(',')[1];}
+
+// ===== Init =====
+async function init(){
+  document.getElementById('genTime').innerText=new Date().toLocaleString();
+  const idx=await getIndexFiles();
+  if(idx.length===0){document.getElementById('reportArea').innerHTML='<p style="color:red">No index files found.</p>';return;}
+  let all=[];
+  for(const f of idx){const d=await loadIndexData(f);all.push(...d);}
+  populateSites(all);
+  document.getElementById('siteSelect').onchange=e=>{populatePools(e.target.value,all);document.getElementById('dateSelect').innerHTML='<option value="">-- Select Date --</option>';};
+  document.getElementById('poolSelect').onchange=e=>{populateDates(e.target.value,all);};
+  document.getElementById('dateSelect').onchange=e=>{const pool=document.getElementById('poolSelect').value;showReport(pool,e.target.value,all);};
+  document.getElementById('refreshBtn').onclick=()=>{fetch('gen_index.sh').then(()=>setTimeout(()=>location.reload(),1500));};
+}
+init();
+</script>
+</body>
+</html>
