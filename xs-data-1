@@ -9,8 +9,8 @@
 # ✅ Preserves all original logic
 # ---------------------------------------------------------------------
 
-USER="root"
-PASS="justD0it!"
+USER=""
+PASS=""
 SERVER_LIST="servers.txt"
 SSH_TIMEOUT=15
 USE_SSH_KEY=false
