@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Citrix XenServer Dashboard</title>
+<style>
+body {font-family: Arial, sans-serif; background-color:#f5f8fc; color:#222; margin:40px;}
+h1 {color:#005eb8;}
+select, input[type=text], button {padding:8px; margin:5px; border-radius:5px; border:1px solid #ccc;}
+button {background:#007bff; color:white; cursor:pointer;}
+button:hover {background:#0056b3;}
+table {border-collapse:collapse; width:100%; margin-top:15px; background:white;}
+th, td {border:1px solid #ccc; padding:8px; text-align:left;}
+th {background-color:#007bff; color:white;}
+tr:nth-child(even){background-color:#f2f2f2;}
+.container {max-width:1200px; margin:auto; background:#fff; padding:20px; border-radius:8px; box-shadow:0 0 10px rgba(0,0,0,0.1);}
+.section-title {margin-top:40px; font-size:18px; font-weight:bold; color:#005eb8; border-bottom:2px solid #005eb8; padding-bottom:5px;}
+.chart-container {display:flex; flex-wrap:wrap; gap:30px; margin-top:30px; justify-content:center;}
+canvas {width:250px; height:250px;}
+.chart-title {text-align:center; margin-top:10px; font-weight:bold;}
+#timer {font-size:14px; color:#666;}
+pre {background:#f7f7f7; padding:10px; border-radius:5px; overflow:auto;}
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>Citrix XenServer Resource Dashboard</h1>
+  <p><b>Generated:</b> <span id="genTime"></span></p>
+  <p id="timer">Next auto-refresh in 60:00 minutes</p>
+
+  <label><b>Site:</b></label>
+  <select id="siteSelect"><option value="">-- Select Site --</option></select>
+
+  <label><b>Pool:</b></label>
+  <select id="poolSelect"><option value="">-- Select Pool --</option></select>
+
+  <label><b>Date:</b></label>
+  <select id="dateSelect"><option value="">-- Select Date --</option></select>
+
+  <button id="refreshBtn"> Refresh Index</button>
+
+  <div id="reportArea"></div>
+</div>
+
+<script>
+// ===== Timer / Auto-refresh =====
+const REFRESH_INTERVAL=3600000;
+let countdown=3600;
+setInterval(()=>{countdown--;const m=String(Math.floor(countdown/60)).padStart(2,'0');const s=String(countdown%60).padStart(2,'0');
+document.getElementById('timer').innerText="Next auto-refresh in "+m+":"+s+" minutes";},1000);
+setTimeout(()=>location.reload(),REFRESH_INTERVAL);
+
+// ===== CSV Parser =====
+function parseCSV(text){return text.trim().split(/\r?\n/).map(l=>l.split(',').map(x=>x.trim()));}
+function normalizePath(p){return p ? p.split('/').pop() : null;}
+
+// ===== Load Index Files =====
+async function getIndexFiles(){
+  const res=await fetch("index_filelist.txt?_="+Date.now()).catch(()=>null);
+  if(!res||!res.ok)return[];
+  const txt=await res.text();
+  return txt.trim().split(/\r?\n/).filter(x=>x.length>0);
+}
+
+async function loadIndexData(indexFile){
+  const res=await fetch(indexFile+"?_="+Date.now()).catch(()=>null);
+  if(!res||!res.ok)return[];
+  const text=await res.text();
+  let lines=parseCSV(text).filter(l=>l.length>=2);
+  if(lines[0]&&lines[0][0].toUpperCase().includes("POOL NAME"))lines=lines.slice(1);
+  const data=[];
+  for(const [pool_name,,csv_pathRaw] of lines){
+    if(!csv_pathRaw)continue;
+    const csv_path=normalizePath(csv_pathRaw);
+    const parts=pool_name.trim().split('_');
+    const site=parts[0].toUpperCase();
+    const pool=parts.slice(1).join('_').toUpperCase();
+    const date=indexFile.match(/\d{4}-\d{2}-\d{2}/)?.[0]||'Unknown';
+    data.push({site,pool,csv_path,indexFile,date});
+  }
+  return data;
+}
+
+// ===== Dropdown Handling =====
+function populateSites(data){
+  const sites=[...new Set(data.map(d=>d.site))].sort();
+  const sel=document.getElementById('siteSelect');
+  sel.innerHTML='<option value="">-- Select Site --</option>';
+  sites.forEach(s=>{const o=document.createElement('option');o.value=s;o.textContent=s;sel.appendChild(o);});
+}
+function populatePools(site,data){
+  const pools=[...new Set(data.filter(d=>d.site===site).map(d=>d.pool))];
+  const sel=document.getElementById('poolSelect');
+  sel.innerHTML='<option value="">-- Select Pool --</option>';
+  pools.forEach(p=>{const o=document.createElement('option');o.value=p;o.textContent=p;sel.appendChild(o);});
+}
+function populateDates(pool,data){
+  const dates=[...new Set(data.filter(d=>d.pool===pool).map(d=>d.date))];
+  const sel=document.getElementById('dateSelect');
+  sel.innerHTML='<option value="">-- Select Date --</option>';
+  dates.sort().forEach(dt=>{const o=document.createElement('option');o.value=dt;o.textContent=dt;sel.appendChild(o);});
+}
+
+// ===== Draw Pie Chart =====
+function drawPie(canvas, used, total, label, color){
+  const ctx=canvas.getContext('2d');
+  canvas.width=250;canvas.height=250;
+  const usedPct=total?Math.min((used/total)*100,100):0;
+  const angle=(usedPct/100)*2*Math.PI;
+  const cx=canvas.width/2,cy=canvas.height/2,r=100;
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  ctx.beginPath();ctx.moveTo(cx,cy);ctx.arc(cx,cy,r,0,2*Math.PI);ctx.closePath();
+  ctx.fillStyle='#e5e5e5';ctx.fill();
+  ctx.beginPath();ctx.moveTo(cx,cy);ctx.arc(cx,cy,r,-Math.PI/2,-Math.PI/2+angle,false);ctx.closePath();
+  ctx.fillStyle=color;ctx.fill();
+  ctx.fillStyle='#000';ctx.font='16px Arial';ctx.textAlign='center';ctx.textBaseline='middle';
+  ctx.fillText(label,cx,cy-10);ctx.fillText(`${usedPct.toFixed(1)}% Used`,cx,cy+15);
+}
+
+// ===== Render Report =====
+async function showReport(pool,date,allData){
+  const e=allData.filter(d=>d.pool===pool&&d.date===date).pop();
+  if(!e){document.getElementById('reportArea').innerHTML=`<p style='color:red'>No data for ${pool} on ${date}</p>`;return;}
+  const r=await fetch(e.csv_path).catch(()=>null);
+  if(!r||!r.ok){document.getElementById('reportArea').innerHTML=`<p style='color:red'>Cannot load CSV: ${e.csv_path}</p>`;return;}
+  const txt=await r.text();
+  const lines=txt.split(/\r?\n/);
+
+  const hosts=[];let section='main';let summary=[],storage=[],capacity=[];
+  for(const l of lines){
+    if(!l.trim())continue;
+    if(l.startsWith('POOL SUMMARY')){section='summary';continue;}
+    if(l.startsWith('STORAGE REPOSITORIES')){section='storage';continue;}
+    if(l.startsWith('POOL CAPACITY SUMMARY')){section='capacity';continue;}
+    if(l.startsWith('POOL NAME'))continue;
+    if(section==='main'&&l.includes(',')){
+      const f=l.split(',');
+      if(f.length>=8)hosts.push({host:f[1],cpu:f[2],ctrl:f[3],used:f[4],free:f[5],total:f[6],vm:f[7],vm16:f[8],vm32:f[9],ht:f[10]});
+    }else if(section==='summary'){summary.push(l);}
+    else if(section==='storage'){storage.push(l);}
+    else if(section==='capacity'){capacity.push(l);}
+  }
+
+  // Parse numeric values for charts
+  let memTotal=0,memUsed=0,srTotal=0,srUsed=0,totalVMs=0,vmCap=0;
+  capacity.forEach(l=>{
+    if(l.startsWith('Memory Total'))memTotal=parseInt(l.split(',')[1])||0;
+    if(l.startsWith('Memory Used'))memUsed=parseInt(l.split(',')[1])||0;
+    if(l.startsWith('SR Total'))srTotal=parseInt(l.split(',')[1])||0;
+    if(l.startsWith('SR Used'))srUsed=parseInt(l.split(',')[1])||0;
+    if(l.startsWith('Running VMs'))totalVMs=parseInt(l.split(',')[1])||0;
+    if(l.startsWith('16GB VM Capacity'))vmCap=parseInt(l.split(',')[1])||0;
+  });
+
+  let html=`<h2>${e.site} | ${e.pool} | ${date}</h2>
+  <div class='section-title'>Pool Host Details</div>
+  <table><tr><th>Host</th><th>CPU</th><th>Ctrl Mem</th><th>Used</th><th>Free</th><th>Total</th><th>Running VMs</th><th>16GB VMs</th><th>32GB VMs</th><th>HT</th></tr>`;
+  hosts.forEach(h=>{html+=`<tr><td>${h.host}</td><td>${h.cpu}</td><td>${h.ctrl}</td><td>${h.used}</td><td>${h.free}</td><td>${h.total}</td><td>${h.vm}</td><td>${h.vm16}</td><td>${h.vm32}</td><td>${h.ht}</td></tr>`;});
+  html+='</table>';
+
+  html+=`
+  <div class='chart-container'>
+    <div><canvas id='memChart'></canvas><div class='chart-title'>Memory Usage</div></div>
+    <div><canvas id='srChart'></canvas><div class='chart-title'>Storage Usage</div></div>
+    <div><canvas id='vmChart'></canvas><div class='chart-title'>VM Utilization</div></div>
+  </div>`;
+
+  html+=`<div class='section-title'>Pool Summary</div><pre>${summary.join('\n')}</pre>`;
+  html+=`<div class='section-title'>Storage Repositories</div><pre>${storage.join('\n')}</pre>`;
+  html+=`<div class='section-title'>Pool Capacity Summary</div><pre>${capacity.join('\n')}</pre>`;
+
+  document.getElementById('reportArea').innerHTML=html;
+
+  // Draw Pie Charts
+  drawPie(document.getElementById('memChart'),memUsed,memTotal,'Memory','#007bff');
+  drawPie(document.getElementById('srChart'),srUsed,srTotal,'Storage','#28a745');
+  drawPie(document.getElementById('vmChart'),totalVMs,vmCap||totalVMs,'VMs','#ff9800');
+}
+
+// ===== Init =====
+async function init(){
+  document.getElementById('genTime').innerText=new Date().toLocaleString();
+  const idx=await getIndexFiles();
+  if(idx.length===0){document.getElementById('reportArea').innerHTML='<p style="color:red">No index files found.</p>';return;}
+  let all=[];
+  for(const f of idx){const d=await loadIndexData(f);all.push(...d);}
+  populateSites(all);
+  document.getElementById('siteSelect').onchange=e=>{populatePools(e.target.value,all);document.getElementById('dateSelect').innerHTML='<option value="">-- Select Date --</option>';};
+  document.getElementById('poolSelect').onchange=e=>{populateDates(e.target.value,all);};
+  document.getElementById('dateSelect').onchange=e=>{const pool=document.getElementById('poolSelect').value;showReport(pool,e.target.value,all);};
+  document.getElementById('refreshBtn').onclick=()=>{fetch('gen_index.sh').then(()=>setTimeout(()=>location.reload(),1500));};
+}
+init();
+</script>
+</body>
+</html>
