@@ -3,8 +3,8 @@
 # Citrix XenServer / Hypervisor Multi-Pool SSH Collector (v1)
 # ---------------------------------------------------------------------
 
-USER="root"                   # SSH username
-PASS="justD0it!"       # SSH password if not using keys
+USER=""                   # SSH username
+PASS=""       # SSH password if not using keys
 SERVER_LIST="servers.txt"   # File containing XenServer pool masters
 SSH_TIMEOUT=15
 USE_SSH_KEY=false             # true=SSH key, false=password
