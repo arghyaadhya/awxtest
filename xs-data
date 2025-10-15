@@ -81,11 +81,7 @@ for uuid in $hosts; do
     ht_state="Unknown"
   fi
 
-  physical_cores=$(grep "core id" /proc/cpuinfo | sort -u | wc -l)
-  logical_cores=$(grep -c ^processor /proc/cpuinfo)
-  ht_summary="${ht_state} (${logical_cores}L/${physical_cores}P)"
-
-  echo "$pool_name,$host_name,$cpu,$ctrl_mem_gb,$mem_used_gb,$mem_free_gb,$usable_mem_gb,$vm_count,$ht_summary" >> "$csv_file"
+  echo "$pool_name,$host_name,$cpu,$ctrl_mem_gb,$mem_used_gb,$mem_free_gb,$usable_mem_gb,$vm_count,$ht_state" >> "$csv_file"
 
   total_cpu=$((total_cpu + cpu))
   total_mem_total=$((total_mem_total + mem_total_gb))
