@@ -1,0 +1,61 @@
+# --- Reliable VM memory collection: write raw mem bytes to file, then calculate ---
+  vm_32gb_count=0
+  vm_16_abcvde_count=0
+  vm_16_abcvder_count=0
+
+  debug_raw="/tmp/vm_memory_raw_${host_name}.csv"
+  > "$debug_raw"
+
+  # 1) Collect raw memory values for running VMs (name, raw_value)
+  for vm_uuid in $(xe vm-list resident-on="$uuid" power-state=running --minimal | tr ',' ' '); do
+    [[ -z "$vm_uuid" ]] && continue
+    vm_name=$(xe vm-param-get uuid="$vm_uuid" param-name=name-label 2>/dev/null)
+    mem_raw=$(xe vm-param-get uuid="$vm_uuid" param-name=memory-static-max 2>/dev/null)
+    # write raw value even if empty (so you can inspect)
+    echo "${vm_name},${mem_raw}" >> "$debug_raw"
+  done
+
+  # 2) Process the collected raw file and safely determine GB values
+  while IFS=',' read -r vm_name mem_raw; do
+    # skip blank lines
+    [[ -z "$vm_name" && -z "$mem_raw" ]] && continue
+
+    # ensure mem_raw looks numeric; otherwise skip
+    if ! [[ "$mem_raw" =~ ^[0-9]+$ ]]; then
+      # record for debugging (not counted)
+      continue
+    fi
+
+    # Convert to GB robustly:
+    # - If the raw value >= 1 GiB in bytes (>= 1 * 1024^3) => treat as bytes
+    # - Else if raw >= 1000 (likely MB) and < 1 GiB => treat as MB
+    # - Else treat as GB already
+    if (( mem_raw >= 1073741824 )); then
+      mem_gb=$(( mem_raw / 1024 / 1024 / 1024 ))
+    elif (( mem_raw >= 1000 )); then
+      # treat as MB
+      mem_gb=$(( mem_raw / 1024 ))
+    else
+      # treat as GB
+      mem_gb=$mem_raw
+    fi
+
+    # sanity clamp: ignore absurd values
+    if (( mem_gb <= 0 || mem_gb > 1024 )); then
+      continue
+    fi
+
+    # classification
+    if (( mem_gb == 32 )); then
+      ((vm_32gb_count++))
+    elif (( mem_gb == 16 )); then
+      if echo "$vm_name" | grep -qi "ABCvDER"; then
+        ((vm_16_abcvder_count++))
+      elif echo "$vm_name" | grep -qi "ABCvDE" && ! echo "$vm_name" | grep -qi "ABCvDER"; then
+        ((vm_16_abcvde_count++))
+      fi
+    fi
+  done < "$debug_raw"
+
+  # Remove debug raw file after processing
+  rm -f "$debug_raw"
