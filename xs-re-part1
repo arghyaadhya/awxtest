@@ -1,0 +1,44 @@
+# --- Case-insensitive VM classification
+  vm_32gb_count=0
+  vm_16_abcvde_count=0
+  vm_16_abcvder_count=0
+
+  for vm_uuid in $(xe vm-list resident-on="$uuid" power-state=running --minimal | tr ',' ' '); do
+    [[ -z "$vm_uuid" ]] && continue
+
+    mem_bytes=$(xe vm-param-get uuid="$vm_uuid" param-name=memory-static-max 2>/dev/null)
+    vm_name=$(xe vm-param-get uuid="$vm_uuid" param-name=name-label 2>/dev/null)
+
+    # Ensure it's a number
+    if ! [[ "$mem_bytes" =~ ^[0-9]+$ ]]; then
+      continue
+    fi
+
+    # Convert safely to GB (handle bytes or MB)
+    if (( mem_bytes > 1099511627776 )); then
+      # already in bytes (≥1TB)
+      mem_gb=$(( mem_bytes / 1024 / 1024 / 1024 ))
+    elif (( mem_bytes > 102400 )); then
+      # probably MB
+      mem_gb=$(( mem_bytes / 1024 ))
+    else
+      # fallback, treat as GB already
+      mem_gb=$mem_bytes
+    fi
+
+    # Defensive clamp
+    if (( mem_gb < 1 || mem_gb > 512 )); then
+      continue
+    fi
+
+    # Classify 16/32 GB VMs by name
+    if (( mem_gb == 32 )); then
+      ((vm_32gb_count++))
+    elif (( mem_gb == 16 )); then
+      if echo "$vm_name" | grep -qi "ABCvDER"; then
+        ((vm_16_abcvder_count++))
+      elif echo "$vm_name" | grep -qi "ABCvDE" && ! echo "$vm_name" | grep -qi "ABCvDER"; then
+        ((vm_16_abcvde_count++))
+      fi
+    fi
+  done
