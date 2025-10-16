@@ -2,15 +2,21 @@
 # ---------------------------------------------------------------------
 # Citrix XenServer / Hypervisor Multi-Pool SSH Collector (v1)
 # ---------------------------------------------------------------------
+# Features:
+# - Per-host CPU, memory, VM, and hyperthreading data
+# - Counts 16GB / 32GB VMs only (Control Domain excluded)
+# - Appends Pool Summary, Storage Summary, and Pool Capacity Summary
+# - Builds master index and index_filelist
+# ---------------------------------------------------------------------
 
 USER=""                   # SSH username
-PASS=""       # SSH password if not using keys
-SERVER_LIST="servers.txt"   # File containing XenServer pool masters
+PASS=""                   # SSH password if not using keys
+SERVER_LIST="servers.txt" # File containing XenServer pool masters
 SSH_TIMEOUT=15
-USE_SSH_KEY=false             # true=SSH key, false=password
+USE_SSH_KEY=false          # true=SSH key, false=password
 TMP_DIR="/u/arghyaa/working-script/xs_report/xenpool_collect_tmp"
 DATESTAMP=$(date +%Y-%m-%d_%H-%M)
-MASTER_INDEX="/u/arghyaa/working-script/xs_report/xenpool_collect_tmp/xenpool_index_${DATESTAMP}.csv"
+MASTER_INDEX="${TMP_DIR}/xenpool_index_${DATESTAMP}.csv"
 
 mkdir -p "$TMP_DIR"
 > "$MASTER_INDEX"
@@ -18,7 +24,7 @@ mkdir -p "$TMP_DIR"
 [[ ! -f "$SERVER_LIST" ]] && { echo "Error: $SERVER_LIST not found!"; exit 1; }
 
 echo "=============================================================="
-echo " Citrix XenServer Multi-Pool SSH Collector (v1)"
+echo " Citrix XenServer Multi-Pool SSH Collector (v1.7)"
 echo "=============================================================="
 echo "Using server list: $SERVER_LIST"
 echo "Reports directory: $TMP_DIR"
@@ -33,6 +39,10 @@ csv_file="/tmp/xenpool_summary_${timestamp}.csv"
 pool_name=$(xe pool-list | grep "name-label ( RW):" | awk '{print $4}')
 [[ -z "$pool_name" ]] && pool_name="Standalone_Host"
 
+# Byte values for memory size detection
+mem16gb_bytes=17179869184
+mem32gb_bytes=34359738368
+
 total_cpu=0
 total_mem_total=0
 total_mem_usable=0
@@ -40,17 +50,22 @@ total_mem_used=0
 total_mem_free=0
 total_ctrl_mem=0
 total_vms=0
+total_vm16=0
+total_vm32=0
 
 hosts=$(xe host-list --minimal | tr ',' ' ')
 [[ -z "$hosts" ]] && { echo "No hosts found."; exit 1; }
 
-echo "POOL NAME,HOST NAME,CPU,CTRL_MEM(GB),USED(GB),FREE(GB),TOTAL(GB),RUNNING_VM" > "$csv_file"
+echo "POOL NAME,HOST NAME,CPU,CPU_MODEL,CPU_DOM0,LOAD_AVG,CTRL_MEM(GB),USED(GB),FREE(GB),TOTAL(GB),RUNNING_VM,VM_16GB_COUNT,VM_32GB_COUNT,HYPERTHREADING" > "$csv_file"
 
 # --- Host Metrics Section ---
 for uuid in $hosts; do
   host_name=$(xe host-param-get uuid="$uuid" param-name=name-label)
   cpu=$(xe host-cpu-info host-uuid="$uuid" --minimal)
   [[ -z "$cpu" ]] && cpu=0
+  cpu_mod=$(cat /proc/cpuinfo | grep 'model name' | cut -d: -f2- | head -n 1)
+  cpu_dom=$(xl vcpu-list | grep 'Domain-0' | wc -l)
+  load=$(xe host-data-source-query data-source=loadavg uuid="$uuid" | sed -e 's/value: //g' | xargs printf "%.3f\n")
 
   mem_total_bytes=$(xe host-param-get uuid="$uuid" param-name=memory-total)
   mem_free_bytes=$(xe host-param-get uuid="$uuid" param-name=memory-free)
@@ -66,10 +81,34 @@ for uuid in $hosts; do
   usable_mem_gb=$((mem_total_gb - ctrl_mem_gb))
   [[ $mem_used_gb -lt 0 ]] && mem_used_gb=0
 
-  vm_count=$(xe vm-list resident-on="$uuid" power-state=running \
-    | grep "name-label" | grep -vi "Control" | awk '{print $NF}' | sort | wc -l)
+  vm_16gb_count=0
+  vm_32gb_count=0
+  vm_count=0
 
-  echo "$pool_name,$host_name,$cpu,$ctrl_mem_gb,$mem_used_gb,$mem_free_gb,$usable_mem_gb,$vm_count" >> "$csv_file"
+  for vm_uuid in $(xe vm-list resident-on="$uuid" power-state=running --minimal | tr ',' ' '); do
+    is_control=$(xe vm-param-get uuid="$vm_uuid" param-name=is-control-domain 2>/dev/null)
+    [[ "$is_control" == "true" ]] && continue
+
+    ((vm_count++))
+    mem_bytes=$(xe vm-param-get uuid="$vm_uuid" param-name=memory-static-max 2>/dev/null)
+    [[ -z "$mem_bytes" ]] && continue
+
+    if [[ "$mem_bytes" == "$mem16gb_bytes" ]]; then
+      ((vm_16gb_count++))
+    elif [[ "$mem_bytes" == "$mem32gb_bytes" ]]; then
+      ((vm_32gb_count++))
+    fi
+  done
+
+  # --- Hyperthreading Info ---
+  if [[ -f /sys/devices/system/cpu/smt/active ]]; then
+    smt_status=$(cat /sys/devices/system/cpu/smt/active)
+    [[ "$smt_status" -eq 1 ]] && ht_state="Enabled" || ht_state="Disabled"
+  else
+    ht_state="Unknown"
+  fi
+
+  echo "$pool_name,$host_name,$cpu,$cpu_mod,$cpu_dom,$load,$ctrl_mem_gb,$mem_used_gb,$mem_free_gb,$usable_mem_gb,$vm_count,$vm_16gb_count,$vm_32gb_count,$ht_state" >> "$csv_file"
 
   total_cpu=$((total_cpu + cpu))
   total_mem_total=$((total_mem_total + mem_total_gb))
@@ -78,6 +117,8 @@ for uuid in $hosts; do
   total_mem_free=$((total_mem_free + mem_free_gb))
   total_ctrl_mem=$((total_ctrl_mem + ctrl_mem_gb))
   total_vms=$((total_vms + vm_count))
+  total_vm16=$((total_vm16 + vm_16gb_count))
+  total_vm32=$((total_vm32 + vm_32gb_count))
 done
 
 usable_mem_pool=$((total_mem_usable - total_ctrl_mem))
@@ -86,16 +127,22 @@ total_16gb_vm_cap=$((usable_mem_pool / 16))
 # --- Pool Summary Section ---
 {
   echo ""
+  echo "======================="
   echo "POOL SUMMARY"
+  echo "======================="
   echo "Total Running VMs,$total_vms"
   echo "Usable Memory (GB),$usable_mem_pool"
   echo "16GB VM Capacity (Approx),$total_16gb_vm_cap"
+  echo "Total 16GB VMs,$total_vm16"
+  echo "Total 32GB VMs,$total_vm32"
 } >> "$csv_file"
 
 # --- Storage Repository Section ---
 {
   echo ""
+  echo "======================="
   echo "STORAGE REPOSITORIES"
+  echo "======================="
   echo "SR NAME,TOTAL(GB),USED(GB),FREE(GB),TYPE"
 } >> "$csv_file"
 
@@ -107,7 +154,6 @@ for sr_uuid in $(xe sr-list --minimal | tr ',' ' '); do
   sr_used=$(xe sr-param-get uuid="$sr_uuid" param-name=physical-utilisation)
   sr_type=$(xe sr-param-get uuid="$sr_uuid" param-name=type)
 
-  # Skip DVD/empty SRs
   if [[ "$sr_type" == "iso" ]] || [[ "$sr_type" == "udev" ]] || [[ "$sr_total" -eq 0 ]]; then
     continue
   fi
@@ -121,13 +167,14 @@ for sr_uuid in $(xe sr-list --minimal | tr ',' ' '); do
   total_sr_total=$((total_sr_total + total_gb))
   total_sr_used=$((total_sr_used + used_gb))
 done
-
 total_sr_free=$((total_sr_total - total_sr_used))
 
-# --- Final Pool Capacity Summary ---
+# --- Pool Capacity Summary ---
 {
   echo ""
+  echo "======================="
   echo "POOL CAPACITY SUMMARY"
+  echo "======================="
   echo "Metric,Total(GB)"
   echo "CPU Cores,$total_cpu"
   echo "Memory Total,$total_mem_total"
@@ -138,6 +185,8 @@ total_sr_free=$((total_sr_total - total_sr_used))
   echo "SR Used,$total_sr_used"
   echo "SR Free,$total_sr_free"
   echo "Running VMs,$total_vms"
+  echo "16GB VMs,$total_vm16"
+  echo "32GB VMs,$total_vm32"
 } >> "$csv_file"
 
 echo "$pool_name,$csv_file"
@@ -176,7 +225,6 @@ for server in $(grep -v '^#' "$SERVER_LIST" | xargs); do
     echo "Pool [$pool_name] data saved to: $local_csv"
     echo "$pool_name,$server,$local_csv" >> "$MASTER_INDEX"
 
-    # Delete all temporary CSVs from remote server
     if [[ "$USE_SSH_KEY" == true ]]; then
       ssh -o ConnectTimeout=$SSH_TIMEOUT $USER@$server "rm -f /tmp/xenpool_summary_*.csv" >/dev/null 2>&1
     else
@@ -191,3 +239,7 @@ echo "------------------------------------------------------------------"
 echo " All Pool Reports Collected"
 echo " Master Index: $MASTER_INDEX"
 echo "------------------------------------------------------------------"
+
+# --- Create index_filelist.txt with only master index filenames ---
+find "$TMP_DIR" -type f -name "xenpool_index_*.csv" -exec basename {} \; | sort > "${TMP_DIR}/index_filelist.txt"
+echo "Index file list created: ${TMP_DIR}/index_filelist.txt"
