@@ -6,7 +6,7 @@
 # ---------------------------------------------------------------------
 
 USER="root"                   # SSH username
-PASS="justD0it!"                   # SSH password if not using keys
+PASS=""                   # SSH password if not using keys
 SERVER_LIST="servers.txt" # File containing XenServer pool masters (one per line)
 SSH_TIMEOUT=15
 USE_SSH_KEY=false          # true=SSH key, false=password
