@@ -1,0 +1,276 @@
+#!/bin/bash
+# ---------------------------------------------------------------------
+# Citrix XenServer / Hypervisor Multi-Pool SSH Collector (final layout)
+# - Local storage (lvm/ext) aggregated per-host and printed inline in host table
+# - SR NAME = host name, SR TYPE = local_storage (inline only)
+# - No separate listing for local SRs; only NFS SRs printed separately
+# - Optimized 16GB/32GB VM counting (one xe call per host)
+# - Fixed timestamp duplication
+# ---------------------------------------------------------------------
+USER="root"
+PASS=""
+SERVER_LIST="servers.txt"
+SSH_TIMEOUT=15
+USE_SSH_KEY=false
+TMP_DIR="/u/arghyaa/working-script/xs_report/xenpool_collect_tmp"
+DATESTAMP=$(date +%Y-%m-%d_%H-%M)
+MASTER_INDEX="$TMP_DIR/xenpool_index_${DATESTAMP}.csv"
+
+mkdir -p "$TMP_DIR"
+> "$MASTER_INDEX"
+
+[[ ! -f "$SERVER_LIST" ]] && { echo "Error: $SERVER_LIST not found!"; exit 1; }
+
+echo "=============================================================="
+echo " Citrix XenServer Multi-Pool SSH Collector (final layout)"
+echo "=============================================================="
+echo "Using server list: $SERVER_LIST"
+echo "Reports directory: $TMP_DIR"
+echo "=============================================================="
+
+# --- Remote Script (runs on each XenServer host) ---
+read -r -d '' REMOTE_SCRIPT <<'EOF'
+timestamp=$(date +"%Y-%m-%d_%H-%M")
+csv_file="/tmp/xenpool_summary_${timestamp}.csv"
+
+pool_name=$(xe pool-list 2>/dev/null | awk -F: '/name-label \( RW\):/ {print $2}' | xargs)
+[[ -z "$pool_name" ]] && pool_name="Standalone_Host"
+
+total_cpu=0
+total_mem_total=0
+total_mem_usable=0
+total_mem_used=0
+total_mem_free=0
+total_ctrl_mem=0
+total_vms=0
+
+hosts=$(xe host-list --minimal 2>/dev/null | tr ',' ' ')
+[[ -z "$hosts" ]] && { echo "No hosts found."; exit 1; }
+
+# Header (unchanged)
+echo "POOL NAME,HOST NAME,CPU,CPU_MODEL,DOM0_CPU,LOAD_AVG,CTRL_MEM(GB),USED_MEM(GB),FREE_MEM(GB),TOTAL_MEM(GB),RUNNING_VM,HYPERTHREADING,UPTIME_DAYS,ETH0_STATUS,ETH0_SPEED,ETH0_MAC,ETH1_STATUS,ETH1_SPEED,ETH1_MAC,BOND0_STATUS,BOND0_SPEED,16GB_VM_COUNT,32GB_VM_COUNT,SR NAME,SR TOTAL(GB),SR USED(GB),SR FREE(GB),SR TYPE" > "$csv_file"
+
+# Collect SR info once (for pool-level totals and to compute local-type aggregates)
+declare -A SR_TOTAL SR_USED SR_FREE SR_TYPE
+for sr_uuid in $(xe sr-list --minimal 2>/dev/null | tr ',' ' '); do
+  sr_type=$(xe sr-param-get uuid="$sr_uuid" param-name=type 2>/dev/null)
+  # skip iso/udev and empty entries
+  [[ "$sr_type" == "iso" || "$sr_type" == "udev" ]] && continue
+  sr_total=$(xe sr-param-get uuid="$sr_uuid" param-name=physical-size 2>/dev/null)
+  sr_used=$(xe sr-param-get uuid="$sr_uuid" param-name=physical-utilisation 2>/dev/null)
+  [[ -z "$sr_total" || "$sr_total" -eq 0 ]] && continue
+  SR_TYPE["$sr_uuid"]="$sr_type"
+  SR_TOTAL["$sr_uuid"]=$((sr_total/1024/1024/1024))
+  SR_USED["$sr_uuid"]=$((sr_used/1024/1024/1024))
+  SR_FREE["$sr_uuid"]=$(( SR_TOTAL["$sr_uuid"] - SR_USED["$sr_uuid"] ))
+done
+
+# For each host, print host row and embed aggregated local storage (lvm/ext) into that row.
+for uuid in $hosts; do
+  host_name=$(xe host-param-get uuid="$uuid" param-name=name-label 2>/dev/null)
+  host_name=${host_name:-$uuid}
+  cpu=$(xe host-cpu-info host-uuid="$uuid" --minimal 2>/dev/null)
+  [[ -z "$cpu" ]] && cpu=0
+
+  cpu_model=$(xe host-cpu-info host-uuid="$uuid" 2>/dev/null | awk -F: '/model name/ { $1=""; gsub(/^ +| +$/,"",$0); print substr($0,2); exit }')
+  [[ -z "$cpu_model" ]] && cpu_model=$(grep -m1 "model name" /proc/cpuinfo 2>/dev/null | cut -d: -f2- | xargs)
+  cpu_model=${cpu_model:-"Unknown"}
+
+  dom0_cpu=$(xl vcpu-list | grep 'Domain-0' | wc -l)
+  dom0_cpu=${dom0_cpu:-"NA"}
+
+  load_avg=$(awk '{print $1}' /proc/loadavg 2>/dev/null)
+  load_avg=${load_avg:-"NA"}
+
+  mem_total_bytes=$(xe host-param-get uuid="$uuid" param-name=memory-total 2>/dev/null)
+  mem_free_bytes=$(xe host-param-get uuid="$uuid" param-name=memory-free 2>/dev/null)
+  ctrl_mem_mib=$(xl list Domain-0 2>/dev/null | awk 'NR==2 {print $3}')
+  [[ -z "$ctrl_mem_mib" ]] && ctrl_mem_mib=0
+  ctrl_mem_bytes=$((ctrl_mem_mib * 1024 * 1024))
+
+  mem_total_gb=$((mem_total_bytes/1024/1024/1024))
+  mem_free_gb=$((mem_free_bytes/1024/1024/1024))
+  ctrl_mem_gb=$((ctrl_mem_bytes/1024/1024/1024))
+  mem_used_gb=$((mem_total_gb - mem_free_gb))
+  usable_mem_gb=$((mem_total_gb - ctrl_mem_gb))
+  [[ $mem_used_gb -lt 0 ]] && mem_used_gb=0
+
+  vm_count=$(xe vm-list resident-on="$uuid" power-state=running 2>/dev/null | grep "name-label" | grep -vi "Control" | wc -l)
+  vm_count=${vm_count:-0}
+
+  if [[ -f /sys/devices/system/cpu/smt/active ]]; then
+    smt_status=$(cat /sys/devices/system/cpu/smt/active 2>/dev/null)
+    [[ "$smt_status" == "1" ]] && ht_state="Enabled" || ht_state="Disabled"
+  else
+    ht_state="Unknown"
+  fi
+
+  uptime_days=$(awk '{print int($1/86400)}' /proc/uptime)
+
+  get_status() {
+    local iface="$1"
+    [[ -f /sys/class/net/$iface/carrier ]] && grep -q 1 /sys/class/net/$iface/carrier && echo "UP" || echo "DOWN"
+  }
+
+  get_speed() {
+    local iface="$1"
+    [[ -f /sys/class/net/$iface/speed ]] && cat /sys/class/net/$iface/speed || echo "NA"
+  }
+
+  get_mac() {
+    local iface="$1"
+    [[ -f /sys/class/net/$iface/address ]] && cat /sys/class/net/$iface/address
+  }
+
+  eth0_status=$(get_status eth0)
+  eth0_speed=$(get_speed eth0)
+  eth0_mac=$(get_mac eth0)
+  eth1_status=$(get_status eth1)
+  eth1_speed=$(get_speed eth1)
+  eth1_mac=$(get_mac eth1)
+  bond0_status=$(get_status bond0)
+  bond0_speed=$(get_speed bond0)
+
+  # --- Aggregate local SRs (lvm/ext) from the SR map (no PBD)
+  sr_total_gb=0
+  sr_used_gb=0
+  sr_free_gb=0
+  for sr_uuid in "${!SR_TYPE[@]}"; do
+    sr_type="${SR_TYPE[$sr_uuid]}"
+    if [[ "$sr_type" == "lvm" || "$sr_type" == "ext" ]]; then
+      sr_total_gb=$((sr_total_gb + SR_TOTAL[$sr_uuid]))
+      sr_used_gb=$((sr_used_gb + SR_USED[$sr_uuid]))
+      sr_free_gb=$((sr_free_gb + SR_FREE[$sr_uuid]))
+    fi
+  done
+  sr_name="${host_name}"
+  sr_type="local_storage"
+
+  # --- Optimized VM-size counting (16GB/32GB)
+  count_16gb=0
+  count_32gb=0
+  TARGET_16GB=$((16 * 1024 * 1024 * 1024))
+  TARGET_32GB=$((32 * 1024 * 1024 * 1024))
+
+  vm_mem_list=$(xe vm-list resident-on="$uuid" is-control-domain=false power-state=running params=memory-static-max --minimal 2>/dev/null | tr ',' ' ')
+  if [[ -n "$vm_mem_list" ]]; then
+    for mem in $vm_mem_list; do
+      [[ -z "$mem" ]] && continue
+      if [[ "$mem" =~ ^[0-9]+$ ]]; then
+        if [[ "$mem" -eq "$TARGET_16GB" ]]; then
+          count_16gb=$((count_16gb + 1))
+        elif [[ "$mem" -eq "$TARGET_32GB" ]]; then
+          count_32gb=$((count_32gb + 1))
+        fi
+      fi
+    done
+  fi
+
+  # Print host row: local storage aggregated inline; no separate local SR list anywhere
+  echo "${pool_name},${host_name},${cpu},\"${cpu_model}\",${dom0_cpu},${load_avg},${ctrl_mem_gb},${mem_used_gb},${mem_free_gb},${usable_mem_gb},${vm_count},${ht_state},${uptime_days},${eth0_status},${eth0_speed},${eth0_mac},${eth1_status},${eth1_speed},${eth1_mac},${bond0_status},${bond0_speed},${count_16gb},${count_32gb},${sr_name},${sr_total_gb},${sr_used_gb},${sr_free_gb},${sr_type}" >> "$csv_file"
+
+  total_cpu=$((total_cpu + cpu))
+  total_mem_total=$((total_mem_total + mem_total_gb))
+  total_mem_usable=$((total_mem_usable + usable_mem_gb))
+  total_mem_used=$((total_mem_used + mem_used_gb))
+  total_mem_free=$((total_mem_free + mem_free_gb))
+  total_ctrl_mem=$((total_ctrl_mem + ctrl_mem_gb))
+  total_vms=$((total_vms + vm_count))
+done
+
+usable_mem_pool=$((total_mem_usable - total_ctrl_mem))
+total_16gb_vm_cap=$((usable_mem_pool / 16))
+total_32gb_vm_cap=$((usable_mem_pool / 32))
+
+# --- Pool-level SR totals (derived from SR map). We do NOT print individual local SRs here.
+total_sr_total=0
+total_sr_used=0
+for sr_uuid in "${!SR_TYPE[@]}"; do
+  total_sr_total=$((total_sr_total + SR_TOTAL[$sr_uuid]))
+  total_sr_used=$((total_sr_used + SR_USED[$sr_uuid]))
+done
+total_sr_free=$((total_sr_total - total_sr_used))
+
+{
+  echo ""
+  echo "POOL CAPACITY SUMMARY"
+  echo "METRIC,VALUE"
+  echo "CPU Cores,${total_cpu}"
+  echo "Memory Total (GB),${total_mem_total}"
+  echo "Memory Used (GB),${total_mem_used}"
+  echo "Memory Free (GB),${total_mem_free}"
+  echo "Usable Memory (GB),${usable_mem_pool}"
+  echo "SR Total (GB),${total_sr_total}"
+  echo "SR Used (GB),${total_sr_used}"
+  echo "SR Free (GB),${total_sr_free}"
+  echo "Running VMs,${total_vms}"
+  echo "16GB VM Capacity (Approx),${total_16gb_vm_cap}"
+  echo "32GB VM Capacity (Approx),${total_32gb_vm_cap}"
+} >> "$csv_file"
+
+final_csv="/tmp/xenpool_final_${timestamp}.csv"
+awk 'BEGIN{p=1} /^POOL CAPACITY SUMMARY/{p=0} p' "$csv_file" > "$final_csv"
+
+# --- NFS REPOSITORIES: printed separately (unchanged) ---
+echo "" >> "$final_csv"
+echo "#NFS REPOSITORIES" >> "$final_csv"
+echo "#SR NAME,TOTAL(GB),USED(GB),FREE(GB),TYPE" >> "$final_csv"
+xe sr-list type=nfs --minimal 2>/dev/null | tr ',' ' ' | while read -r nfs_sr; do
+  [[ -z "$nfs_sr" ]] && continue
+  sr_name_nfs=$(xe sr-param-get uuid="$nfs_sr" param-name=name-label 2>/dev/null)
+  sr_total_nfs=$(xe sr-param-get uuid="$nfs_sr" param-name=physical-size 2>/dev/null)
+  sr_used_nfs=$(xe sr-param-get uuid="$nfs_sr" param-name=physical-utilisation 2>/dev/null)
+  [[ -z "$sr_total_nfs" || -z "$sr_used_nfs" ]] && continue
+  total_gb_nfs=$((sr_total_nfs/1024/1024/1024))
+  used_gb_nfs=$((sr_used_nfs/1024/1024/1024))
+  free_gb_nfs=$((total_gb_nfs - used_gb_nfs))
+  echo "${sr_name_nfs},${total_gb_nfs},${used_gb_nfs},${free_gb_nfs},nfs" >> "$final_csv"
+done
+
+# --- POOL SUMMARY (unchanged) ---
+echo "" >> "$final_csv"
+echo "#POOL SUMMARY" >> "$final_csv"
+echo "#CPU Cores,Memory Total (GB),Memory Used (GB),Memory Free (GB),Usable Memory (GB),SR Used (GB),SR Free (GB),Running VMs,16GB VM Capacity (Approx),32GB VM Capacity (Approx)" >> "$final_csv"
+echo "summary,${total_cpu},${total_mem_total},${total_mem_used},${total_mem_free},${usable_mem_pool},${total_sr_used},${total_sr_free},${total_vms},${total_16gb_vm_cap},${total_32gb_vm_cap}" >> "$final_csv"
+
+# Return pool name and path
+echo "${pool_name},${final_csv}"
+EOF
+
+# --- Loop over pool masters ---
+while read -r server; do
+  [[ -z "$server" || "$server" =~ ^\s*# ]] && continue
+  echo "------------------------------------------------------------------"
+  echo "Connecting to $server ..."
+  if [[ "$USE_SSH_KEY" == true ]]; then
+    result=$(ssh -o ConnectTimeout=$SSH_TIMEOUT "$USER@$server" "bash -s" <<< "$REMOTE_SCRIPT" 2>/dev/null)
+  else
+    result=$(sshpass -p "$PASS" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=$SSH_TIMEOUT "$USER@$server" "bash -s" <<< "$REMOTE_SCRIPT" 2>/dev/null)
+  fi
+  pool_name=$(echo "$result" | awk -F',' '{print $1}')
+  remote_csv=$(echo "$result" | awk -F',' '{print $2}')
+  [[ -z "$pool_name" || -z "$remote_csv" ]] && { echo "Failed to collect data from $server"; continue; }
+  clean_pool=$(echo "$pool_name" | tr -dc 'A-Za-z0-9_-')
+  local_csv="${TMP_DIR}/${clean_pool}_${DATESTAMP}.csv"
+  echo "Fetching pool [$pool_name] CSV from $server ..."
+  if [[ "$USE_SSH_KEY" == true ]]; then
+    scp -o ConnectTimeout=$SSH_TIMEOUT "$USER@$server:$remote_csv" "$local_csv" >/dev/null 2>&1
+  else
+    sshpass -p "$PASS" scp -o StrictHostKeyChecking=no -o ConnectTimeout=$SSH_TIMEOUT "$USER@$server:$remote_csv" "$local_csv" >/dev/null 2>&1
+  fi
+  if [[ -f "$local_csv" ]]; then
+    echo "Pool [$pool_name] data saved to: $local_csv"
+    echo "${pool_name},${server},${local_csv}" >> "$MASTER_INDEX"
+  else
+    echo "Failed to retrieve CSV from $server"
+  fi
+done < <(grep -v '^\s*#' "$SERVER_LIST" | sed '/^\s*$/d')
+
+echo "------------------------------------------------------------------"
+echo " All Pool Reports Collected"
+echo " Master Index: $MASTER_INDEX"
+echo "------------------------------------------------------------------"
+
+find "$TMP_DIR" -type f -name "xenpool_index_*.csv" -exec basename {} \; | sort > "${TMP_DIR}/index_filelist.txt"
+echo "Index file list created: ${TMP_DIR}/index_filelist.txt"
+cp /u/arghyaa/working-script/xs_report/xenpool_collect_tmp/*.csv /u/arghyaa/citrix-report/ 2>/dev/null || true
