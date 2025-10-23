@@ -1,0 +1,15 @@
+if [[ -f "$local_csv" ]]; then
+    echo "Pool [$pool_name] data saved to: $local_csv"
+    echo "${pool_name},${server},${local_csv}" >> "$MASTER_INDEX"
+
+    echo "Cleaning up remote temp CSVs on $server ..."
+    if [[ "$USE_SSH_KEY" == true ]]; then
+      ssh -o ConnectTimeout=$SSH_TIMEOUT "$USER@$server" \
+        "rm -f /tmp/xenpool_*_*.csv" >/dev/null 2>&1
+    else
+      $SSHPASS_BIN -p "$PASS" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=$SSH_TIMEOUT "$USER@$server" \
+        "rm -f /tmp/xenpool_*_*.csv" >/dev/null 2>&1
+    fi
+else
+    echo "Failed to retrieve CSV from $server"
+fi
