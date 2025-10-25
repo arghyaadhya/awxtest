@@ -24,7 +24,7 @@ trap 'rm -f "$LOCKFILE"' EXIT
 
 # ---------------- Configuration ----------------
 USER="root"
-PASS=""
+PASS="justD0it!"
 SSHPASS_BIN="/usr/bin/sshpass"
 SERVER_LIST="/u/arghyaa/working-script/xs_report/servers.txt"
 SSH_TIMEOUT=15
