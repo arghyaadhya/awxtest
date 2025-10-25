@@ -24,12 +24,12 @@ trap 'rm -f "$LOCKFILE"' EXIT
 
 # ---------------- Configuration ----------------
 USER="root"
-PASS=""
+PASS="justD0it!"
 SSHPASS_BIN="/usr/bin/sshpass"
-SERVER_LIST="servers.txt"
+SERVER_LIST="/u/arghyaa/working-script/xs_report/servers.txt"
 SSH_TIMEOUT=15
 USE_SSH_KEY=false
-TMP_DIR="/u/arghyaa/working-script/xs_report/xenpool_collect_tmp"
+TMP_DIR="/SCRATCH/report/xenpool_collect_tmp"
 DATESTAMP=$(date +%Y-%m-%d_%H-%M)
 MASTER_INDEX="$TMP_DIR/xenpool_index_${DATESTAMP}.csv"
 NET_SAMPLE_SEC=2         # configurable network sample seconds
@@ -74,7 +74,7 @@ hosts=$(xe host-list --minimal 2>/dev/null | tr ',' ' ')
 [[ -z "$hosts" ]] && { echo "No hosts found."; exit 1; }
 
 # Header (unchanged except appended util columns before SR NAME)
-echo "POOL NAME,HOST NAME,CPU,CPU_MODEL,DOM0_CPU,LOAD_AVG,CTRL_MEM(GB),USED_MEM(GB),FREE_MEM(GB),TOTAL_MEM(GB),RUNNING_VM,HYPERTHREADING,UPTIME_DAYS,ETH0_STATUS,ETH0_SPEED,ETH0_MAC,ETH1_STATUS,ETH1_SPEED,ETH1_MAC,BOND0_STATUS,BOND0_SPEED,CPU_UTIL(%),MEM_UTIL(%),NET_UTIL(%),SR NAME,SR TOTAL(GB),SR USED(GB),SR FREE(GB),SR TYPE" > "$csv_file"
+echo "#POOL NAME,HOST NAME,CPU,CPU_MODEL,DOM0_CPU,LOAD_AVG,CTRL_MEM(GB),USED_MEM(GB),FREE_MEM(GB),TOTAL_MEM(GB),RUNNING_VM,HYPERTHREADING,UPTIME_DAYS,ETH0_STATUS,ETH0_SPEED,ETH0_MAC,ETH1_STATUS,ETH1_SPEED,ETH1_MAC,BOND0_STATUS,BOND0_SPEED,CPU_UTIL(%),MEM_UTIL(%),NET_UTIL(%),SR NAME,SR TOTAL(GB),SR USED(GB),SR FREE(GB),SR TYPE" > "$csv_file"
 
 # -------------------------
 # Collect SR info once (store name, type, totals) - same logic you used
@@ -284,7 +284,7 @@ for uuid in $hosts; do
   host_util_count=$((host_util_count + 1))
 
   # Write host row (with new util columns)
-  echo "${pool_name},${host_name},${cpu},\"${cpu_model}\",${dom0_cpu},${load_avg},${ctrl_mem_gb},${mem_used_gb},${mem_free_gb},${mem_total_gb},${vm_count},${ht_state},${uptime_days},${eth0_status},${eth0_speed},${eth0_mac},${eth1_status},${eth1_speed},${eth1_mac},${bond0_status},${bond0_speed},${cpu_util_percent},${mem_util_percent},${net_util_percent},${sr_name},${sr_total_gb},${sr_used_gb},${sr_free_gb},${sr_type}" >> "$csv_file"
+  echo "poolhost,${pool_name},${host_name},${cpu},\"${cpu_model}\",${dom0_cpu},${load_avg},${ctrl_mem_gb},${mem_used_gb},${mem_free_gb},${mem_total_gb},${vm_count},${ht_state},${uptime_days},${eth0_status},${eth0_speed},${eth0_mac},${eth1_status},${eth1_speed},${eth1_mac},${bond0_status},${bond0_speed},${cpu_util_percent},${mem_util_percent},${net_util_percent},${sr_name},${sr_total_gb},${sr_used_gb},${sr_free_gb},${sr_type}" >> "$csv_file"
 
   total_cpu=$((total_cpu + cpu))
   total_mem_total=$((total_mem_total + mem_total_gb))
@@ -348,7 +348,7 @@ awk 'BEGIN{p=1} /^POOL CAPACITY SUMMARY/{p=0} p' "$csv_file" > "$final_csv"
 #  NFS REPOS (dynamic) - unchanged
 echo "" >> "$final_csv"
 echo "#NFS REPOSITORIES" >> "$final_csv"
-echo "#SR NAME,TOTAL(GB),USED(GB),FREE(GB),TYPE" >> "$final_csv"
+echo "#TYPE,SR NAME,TOTAL(GB),USED(GB),FREE(GB)" >> "$final_csv"
 xe sr-list type=nfs --minimal 2>/dev/null | tr ',' ' ' | while read -r nfs_sr; do
   [[ -z "$nfs_sr" ]] && continue
   sr_name_nfs=$(xe sr-param-get uuid="$nfs_sr" param-name=name-label 2>/dev/null)
@@ -358,7 +358,7 @@ xe sr-list type=nfs --minimal 2>/dev/null | tr ',' ' ' | while read -r nfs_sr; d
   total_gb_nfs=$((sr_total_nfs/1024/1024/1024))
   used_gb_nfs=$((sr_used_nfs/1024/1024/1024))
   free_gb_nfs=$((total_gb_nfs - used_gb_nfs))
-  echo "${sr_name_nfs},${total_gb_nfs},${used_gb_nfs},${free_gb_nfs},nfs" >> "$final_csv"
+  echo "nfs,${sr_name_nfs},${total_gb_nfs},${used_gb_nfs},${free_gb_nfs}" >> "$final_csv"
 done
 
 #  POOL SUMMARY (single-row) - extended header and single summary row
@@ -416,7 +416,7 @@ echo "------------------------------------------------------------------"
 find "$TMP_DIR" -type f -name "xenpool_index_*.csv" -exec basename {} \; | sort > "${TMP_DIR}/index_filelist.txt"
 echo "Index file list created: ${TMP_DIR}/index_filelist.txt"
 
-cp /u/arghyaa/working-script/xs_report/xenpool_collect_tmp/*.csv /u/arghyaa/citrix-report/ 2>/dev/null || true
+#cp /u/arghyaa/working-script/xs_report/xenpool_collect_tmp/*.csv /u/arghyaa/citrix-report/ 2>/dev/null || true
 
 # lockfile cleanup (safe-guard if trap missed)
 rm -f "$LOCKFILE" 2>/dev/null || true
