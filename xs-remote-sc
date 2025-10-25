@@ -1,0 +1,65 @@
+REMOTE_SCRIPT=$(cat <<'EOSCRIPT'
+#!/bin/bash
+# -----------------------------------------------------------------
+# Robust remote collector: never exits early, always prints output
+# -----------------------------------------------------------------
+export PATH="/usr/sbin:/usr/bin:/sbin:/bin:/opt/xensource/bin"
+timestamp=$(date +"%Y-%m-%d_%H-%M-%S")
+remote_tmp="/tmp/xenpool_report_${timestamp}.csv"
+logfile="/tmp/xen_remote_error_${timestamp}.log"
+exec 2>"$logfile"
+
+# never exit on error
+set +e
+
+pool_name=$(xe pool-list 2>/dev/null | awk -F: '/name-label/ {print $2}' | xargs)
+[[ -z "$pool_name" ]] && pool_name="Standalone_Host"
+pool_name=$(echo "$pool_name" | sed 's/[, ]\+/_/g; s/-\+/-/g; s/_\+/_/g')
+site_name=$(echo "$pool_name" | grep -oE '^[A-Z]{2,}[0-9]{1,3}(?=[_-])' | head -1)
+[[ -z "$site_name" ]] && site_name="UNKNOWN"
+
+total_sr_total=0; total_sr_used=0; total_sr_free=0
+for sr_uuid in $(xe sr-list --minimal 2>/dev/null | tr ',' ' '); do
+  sr_type=$(xe sr-param-get uuid="$sr_uuid" param-name=type 2>/dev/null)
+  sr_name=$(xe sr-param-get uuid="$sr_uuid" param-name=name-label 2>/dev/null)
+  [[ "$sr_type" == "iso" || "$sr_type" == "udev" || -z "$sr_name" ]] && continue
+  sr_total=$(xe sr-param-get uuid="$sr_uuid" param-name=physical-size 2>/dev/null)
+  sr_used=$(xe sr-param-get uuid="$sr_uuid" param-name=physical-utilisation 2>/dev/null)
+  [[ -z "$sr_total" || -z "$sr_used" ]] && continue
+  sr_total_gb=$((sr_total/1024/1024/1024))
+  sr_used_gb=$((sr_used/1024/1024/1024))
+  sr_free_gb=$((sr_total_gb - sr_used_gb))
+  total_sr_total=$((total_sr_total + sr_total_gb))
+  total_sr_used=$((total_sr_used + sr_used_gb))
+done
+total_sr_free=$((total_sr_total - total_sr_used))
+
+hosts=$(xe host-list --minimal 2>/dev/null | tr ',' ' ')
+[[ -z "$hosts" ]] && echo "WARN: No hosts found" >>"$logfile"
+
+for uuid in $hosts; do
+  mmode=$(xe host-param-get uuid="$uuid" param-name=maintenance-mode 2>/dev/null)
+  [[ "$mmode" == "true" ]] && { echo "Skipping $uuid (maintenance)" >>"$logfile"; continue; }
+
+  host_name=$(xe host-param-get uuid="$uuid" param-name=name-label | xargs)
+  host_name=$(echo "$host_name" | sed 's/[, ]\+/_/g')
+  cpu_model=$(xe host-cpu-info host-uuid="$uuid" 2>/dev/null | awk -F: '/model name/{print $2}' | head -1 | xargs)
+  [[ -z "$cpu_model" ]] && cpu_model=$(grep -m1 "model name" /proc/cpuinfo | cut -d: -f2- | xargs)
+  [[ -z "$cpu_model" ]] && cpu_model="Unknown"
+  cpu_model=$(echo "$cpu_model" | sed 's/[",]//g')
+
+  dom0_cpu=$(xl vcpu-list 2>/dev/null | awk '/Domain-0/ {count++} END{print count+0}')
+  [[ -z "$dom0_cpu" ]] && dom0_cpu=0
+  ctrl_mem_mib=$(xl list Domain-0 2>/dev/null | awk 'NR==2{print $3}')
+  [[ -z "$ctrl_mem_mib" ]] && ctrl_mem_mib=0
+  ctrl_mem_gb=$((ctrl_mem_mib/1024))
+
+  echo "poolhost,${site_name},${pool_name},${host_name},${cpu_model},${dom0_cpu},${ctrl_mem_gb}" >> "$remote_tmp"
+done
+
+echo "summary,${site_name},${pool_name},${total_sr_total},${total_sr_used},${total_sr_free}" >> "$remote_tmp"
+
+# Always output even on partial success
+echo "${pool_name},${remote_tmp}"
+EOSCRIPT
+)
