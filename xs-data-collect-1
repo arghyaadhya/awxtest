@@ -1,15 +1,7 @@
 #!/bin/bash
 # ---------------------------------------------------------------------
 # Citrix XenServer / Hypervisor Multi-Pool SSH Collector (Unified Report)
-# FINAL VERSION (FULL SUMMARY RESTORED)
-# ---------------------------------------------------------------------
-#   • Single unified CSV for all sites/pools
-#   • Includes HOST, NFS, and POOL SUMMARY sections with headers (#)
-#   • poolhost / nfs / summary prefixes
-#   • Sorted by SITE → POOL → HOST
-#   • Skips maintenance hosts
-#   • Restores 16GB/32GB *capacity* logic (not per-host VM counting)
-#   • Safe lockfile + daily overwrite design
+# FINAL PRODUCTION VERSION (Stable)
 # ---------------------------------------------------------------------
 
 LOCKFILE="/tmp/xenpool_collect.lock"
@@ -27,7 +19,7 @@ trap 'rm -f "$LOCKFILE"' EXIT
 
 # ---------------- Configuration ----------------
 USER="root"
-PASS=""
+PASS="justD0it!"
 SSHPASS_BIN="/usr/bin/sshpass"
 SERVER_LIST="/u/arghyaa/working-script/xs_report/servers.txt"
 SSH_TIMEOUT=15
@@ -48,19 +40,20 @@ set -euo pipefail
 timestamp=$(date +"%Y-%m-%d_%H-%M-%S")
 remote_tmp="/tmp/xenpool_report_${timestamp}.csv"
 
+# --- Pool / Site info ---
 pool_name=$(xe pool-list 2>/dev/null | awk -F: '/name-label \( RW\):/ {print $2}' | xargs || true)
 [[ -z "$pool_name" ]] && pool_name="Standalone_Host"
-
-# Extract site name (case-insensitive)
-site_name=$(echo "$pool_name" | grep -ioE '^[A-Z]+[0-9]+(?=[_-])' | tr '[:lower:]' '[:upper:]' || true)
+pool_name=$(echo "$pool_name" | sed 's/[, ]\+/_/g; s/-\+/-/g; s/_\+/_/g')
+site_name=$(echo "$pool_name" | grep -ioE '[A-Z]{2,}[0-9]{1,3}' | head -n1 | tr '[:lower:]' '[:upper:]')
 [[ -z "$site_name" ]] && site_name="UNKNOWN"
 
-# --- Gather SR info ---
+# --- SR info ---
 declare -A SR_TOTAL SR_USED SR_FREE SR_TYPE
 total_sr_total=0; total_sr_used=0; total_sr_free=0
 for sr_uuid in $(xe sr-list --minimal | tr ',' ' '); do
   sr_type=$(xe sr-param-get uuid="$sr_uuid" param-name=type 2>/dev/null || echo "")
   sr_name=$(xe sr-param-get uuid="$sr_uuid" param-name=name-label 2>/dev/null || echo "")
+  sr_name=$(echo "$sr_name" | sed 's/[, ]\+/_/g; s/-\+/-/g; s/_\+/_/g')
   [[ "$sr_type" == "iso" || "$sr_type" == "udev" || -z "$sr_name" ]] && continue
   sr_total=$(xe sr-param-get uuid="$sr_uuid" param-name=physical-size 2>/dev/null || echo 0)
   sr_used=$(xe sr-param-get uuid="$sr_uuid" param-name=physical-utilisation 2>/dev/null || echo 0)
@@ -72,7 +65,7 @@ for sr_uuid in $(xe sr-list --minimal | tr ',' ' '); do
   total_sr_free=$((total_sr_free + sr_free_gb))
 done
 
-# --- Initialize accumulators ---
+# --- Accumulators ---
 total_cpu=0; total_mem_total=0; total_mem_used=0; total_mem_free=0; total_ctrl_mem=0; total_vms=0
 sum_cpu_util=0; sum_mem_util=0; sum_net_util=0; host_count=0
 
@@ -89,27 +82,49 @@ for uuid in $(xe host-list --minimal | tr ',' ' '); do
   [[ "$mmode" == "true" ]] && continue
 
   host_name=$(xe host-param-get uuid="$uuid" param-name=name-label 2>/dev/null || echo "$uuid")
+  host_name=$(echo "$host_name" | sed 's/[, ]\+/_/g; s/-\+/-/g; s/_\+/_/g')
+
   cpu=$(xe host-cpu-info host-uuid="$uuid" --minimal 2>/dev/null || echo 1)
   [[ -z "$cpu" || "$cpu" == "0" ]] && cpu=1
   cpu_model=$(xe host-cpu-info host-uuid="$uuid" 2>/dev/null | awk -F: '/model name/{ $1=""; gsub(/^ +| +$/,"",$0); print substr($0,2); exit }' || echo "Unknown")
+  cpu_model=$(echo "$cpu_model" | tr -d ',')
+
   load_avg=$(awk '{print $1}' /proc/loadavg)
   mem_total_bytes=$(xe host-param-get uuid="$uuid" param-name=memory-total)
   mem_free_bytes=$(xe host-param-get uuid="$uuid" param-name=memory-free)
   mem_total_gb=$((mem_total_bytes/1024/1024/1024))
   mem_free_gb=$((mem_free_bytes/1024/1024/1024))
   mem_used_gb=$((mem_total_gb - mem_free_gb))
-  ctrl_mem_mib=$(xl list Domain-0 | awk 'NR==2{print $3}')
+
+  # --- Dom0 CPU / Memory ---
+  dom0_cpu=$(xl vcpu-list 2>/dev/null | awk '/Domain-0/ {count++} END{print count+0}')
+  [[ -z "$dom0_cpu" ]] && dom0_cpu=0
+  ctrl_mem_mib=$(xl list Domain-0 2>/dev/null | awk 'NR==2{print $3}')
+  [[ -z "$ctrl_mem_mib" ]] && ctrl_mem_mib=0
   ctrl_mem_gb=$((ctrl_mem_mib/1024))
+
   vm_count=$(xe vm-list resident-on="$uuid" power-state=running | grep -c "name-label")
 
   iface=$(select_iface)
   net_util_percent=0
+  bond_status="DOWN"
+  bond_speed=0
+
+  if [[ "$iface" == "bond0" && -d /sys/class/net/bond0 ]]; then
+    if [[ -f /sys/class/net/bond0/carrier ]] && grep -q 1 /sys/class/net/bond0/carrier; then
+      bond_status="UP"
+    fi
+    bond_speed=$(cat /sys/class/net/bond0/speed 2>/dev/null || echo 0)
+    [[ -z "$bond_speed" || "$bond_speed" == "NA" ]] && bond_speed=0
+  fi
+
+  # --- Network util (sampled) ---
   if [[ -n "$iface" && -f /sys/class/net/$iface/statistics/rx_bytes ]]; then
     rx1=$(cat /sys/class/net/$iface/statistics/rx_bytes)
-    tx1=$(cat /sys/class/net/$iface/statistics/tx_bytes)
+    tx1=$(cat /sys/class/net/$iface/statistics/rx_bytes)
     sleep 2
     rx2=$(cat /sys/class/net/$iface/statistics/rx_bytes)
-    tx2=$(cat /sys/class/net/$iface/statistics/tx_bytes)
+    tx2=$(cat /sys/class/net/$iface/statistics/rx_bytes)
     delta=$(( (rx2 - rx1) + (tx2 - tx1) ))
     iface_speed=$(cat /sys/class/net/$iface/speed 2>/dev/null || echo 1000)
     iface_mb=$(awk -v s="$iface_speed" 'BEGIN{printf "%.6f",s/8}')
@@ -131,10 +146,9 @@ for uuid in $(xe host-list --minimal | tr ',' ' '); do
   sum_net_util=$(awk -v a="$sum_net_util" -v b="$net_util_percent" 'BEGIN{printf "%.6f",a+b}')
   host_count=$((host_count+1))
 
-  echo "poolhost,${site_name},${pool_name},${host_name},${cpu},\"${cpu_model}\",-,${load_avg},${ctrl_mem_gb},${mem_used_gb},${mem_free_gb},${mem_total_gb},${vm_count},Enabled,0,UP,10000,,,UP,10000,,,UP,10000,${cpu_util},${mem_util},${net_util_percent},${host_name},0,0,0,local_storage" >> "$remote_tmp"
+  echo "poolhost,${site_name},${pool_name},${host_name},${cpu},\"${cpu_model}\",${dom0_cpu},${load_avg},${ctrl_mem_gb},${mem_used_gb},${mem_free_gb},${mem_total_gb},${vm_count},Enabled,0,UP,10000,,,UP,10000,,,${bond_status},${bond_speed},${cpu_util},${mem_util},${net_util_percent},${host_name},0,0,0,local_storage" >> "$remote_tmp"
 done
 
-# --- Pool-level math ---
 usable_mem_pool=$((total_mem_total - total_ctrl_mem))
 total_16gb_vm_cap=$((usable_mem_pool / 16))
 total_32gb_vm_cap=$((usable_mem_pool / 32))
@@ -144,10 +158,10 @@ avg_net=$(awk -v a="$sum_net_util" -v c="$host_count" 'BEGIN{if(c>0) printf "%.1
 
 echo "summary,${site_name},${pool_name},${total_cpu},${total_mem_total},${total_mem_used},${total_mem_free},${usable_mem_pool},${total_sr_total},${total_sr_used},${total_sr_free},${total_vms},${total_16gb_vm_cap},${total_32gb_vm_cap},${avg_cpu},${avg_mem},${avg_net}" >> "$remote_tmp"
 
-# --- NFS Repos ---
 for nfs_sr in $(xe sr-list type=nfs --minimal | tr ',' ' '); do
   [[ -z "$nfs_sr" ]] && continue
   sr_name=$(xe sr-param-get uuid="$nfs_sr" param-name=name-label)
+  sr_name=$(echo "$sr_name" | sed 's/[, ]\+/_/g; s/-\+/-/g; s/_\+/_/g')
   sr_total=$(xe sr-param-get uuid="$nfs_sr" param-name=physical-size)
   sr_used=$(xe sr-param-get uuid="$nfs_sr" param-name=physical-utilisation)
   total_gb=$((sr_total/1024/1024/1024))
@@ -162,7 +176,7 @@ EOF
 # --- Collector loop ---
 while read -r server; do
   [[ -z "$server" || "$server" =~ ^# ]] && continue
-  echo "Collecting data from $server ..."
+  echo "Collecting from $server ..."
   result=$($SSHPASS_BIN -p "$PASS" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=$SSH_TIMEOUT "$USER@$server" "bash -s" <<< "$REMOTE_SCRIPT" 2>/dev/null)
   pool_name=$(echo "$result" | awk -F',' '{print $1}')
   remote_csv=$(echo "$result" | awk -F',' '{print $2}')
@@ -172,9 +186,11 @@ while read -r server; do
   grep '^poolhost,' "$temp_file" >> "$HOST_TMP"
   grep '^nfs,' "$temp_file" >> "$NFS_TMP"
   grep '^summary,' "$temp_file" >> "$SUMMARY_TMP"
+  # --- Delete remote reports ---
+  $SSHPASS_BIN -p "$PASS" ssh -o StrictHostKeyChecking=no "$USER@$server" "rm -f /tmp/xenpool_report_*.csv" >/dev/null 2>&1
 done < <(grep -v '^\s*#' "$SERVER_LIST" | sed '/^\s*$/d')
 
-# --- Merge and sort all sections ---
+# --- Final Merge (sorted) ---
 {
   echo "#HOST DETAILS"
   echo "#TYPE,SITE_NAME,POOL_NAME,HOST_NAME,CPU,CPU_MODEL,DOM0_CPU,LOAD_AVG,CTRL_MEM(GB),USED_MEM(GB),FREE_MEM(GB),TOTAL_MEM(GB),RUNNING_VM,HYPERTHREADING,UPTIME_DAYS,ETH0_STATUS,ETH0_SPEED,ETH0_MAC,ETH1_STATUS,ETH1_SPEED,ETH1_MAC,BOND0_STATUS,BOND0_SPEED,CPU_UTIL(%),MEM_UTIL(%),NET_UTIL(%),SR_NAME,SR_TOTAL(GB),SR_USED(GB),SR_FREE(GB),SR_TYPE"
@@ -192,8 +208,8 @@ done < <(grep -v '^\s*#' "$SERVER_LIST" | sed '/^\s*$/d')
 } > "$COMBINED_FILE"
 
 echo "------------------------------------------------------------------"
-echo "Unified sorted report with full summary created:"
-echo "  $COMBINED_FILE"
+echo "Final unified report generated: $COMBINED_FILE"
 echo "------------------------------------------------------------------"
+
 rm -f "$LOCKFILE" 2>/dev/null || true
 exit 0
