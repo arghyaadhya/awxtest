@@ -256,16 +256,20 @@ echo ""
 echo "Starting cleanup of temporary files..."
 
 # --- 1. Remote cleanup: remove old CSVs on all XenServer hosts ---
-while read -r server; do
-  [[ -z "$server" || "$server" =~ ^\s*# ]] && continue
+echo "Performing remote cleanup on all XenServer hosts..."
+mapfile -t SERVER_ARRAY < <(grep -v '^\s*#' "$SERVER_LIST" | sed '/^\s*$/d')
+
+for server in "${SERVER_ARRAY[@]}"; do
+  [[ -z "$server" ]] && continue
   echo "Cleaning remote temporary files on $server ..."
   if [[ "$USE_SSH_KEY" == true ]]; then
-    ssh -o ConnectTimeout=$SSH_TIMEOUT "$USER@$server" "rm -f /tmp/xenpool_summary_*.csv >/dev/null 2>&1"
+    ssh -o ConnectTimeout=$SSH_TIMEOUT "$USER@$server" \
+      "rm -f /tmp/xenpool_summary_*.csv >/dev/null 2>&1"
   else
     $SSHPASS_BIN -p "$PASS" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=$SSH_TIMEOUT "$USER@$server" \
       "rm -f /tmp/xenpool_summary_*.csv >/dev/null 2>&1"
   fi
-done < <(grep -v '^\s*#' "$SERVER_LIST" | sed '/^\s*$/d')
+done
 
 # --- 2. Local cleanup: remove everything in TMP_DIR except merged CSV ---
 echo "Cleaning local temp directory: $TMP_DIR ..."
