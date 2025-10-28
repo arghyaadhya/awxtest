@@ -1,21 +1,66 @@
-NET_SAMPLE_SEC=2
-host_ip="host01"
+#!/bin/bash
+# ---------------------------------------------------------------------
+# Network Utilization Test for XenServer Hosts
+# ---------------------------------------------------------------------
+# Reads each host from servers.txt and calculates real-time
+# network utilization (%) using /sys/class/net/bond0 statistics.
+# ---------------------------------------------------------------------
+
+USER="root"
 PASS="justD0it!"
 SSHPASS_BIN="/usr/bin/sshpass"
+SERVER_LIST="/u/arghyaa/working-script/xs_report/servers.txt"
 SSH_TIMEOUT=15
+NET_SAMPLE_SEC=2
 
-net_sample=$($SSHPASS_BIN -p "$PASS" ssh -o StrictHostKeyChecking=no \
-  -o ConnectTimeout=$SSH_TIMEOUT root@"$host_ip" \
-  "NET_SAMPLE_SEC=$NET_SAMPLE_SEC bash -c 'iface=bond0;
-if [[ -d /sys/class/net/\$iface ]]; then
-  rx1=\$(cat /sys/class/net/\$iface/statistics/rx_bytes)
-  tx1=\$(cat /sys/class/net/\$iface/statistics/rx_bytes)
-  sleep \$NET_SAMPLE_SEC
-  rx2=\$(cat /sys/class/net/\$iface/statistics/rx_bytes)
-  tx2=\$(cat /sys/class/net/\$iface/statistics/rx_bytes)
-  delta=\$(( (rx2 - rx1) + (tx2 - tx1) ))
-  echo \$delta
-else
-  echo 0
-fi'")
-echo "Bytes transferred in ${NET_SAMPLE_SEC}s: $net_sample"
+# Adjust bond interface and speed (in Mbps) if needed
+IFACE="bond0"
+IFACE_SPEED_Mbps=20000  # 2×10G bonded = 20,000 Mbps
+
+[[ ! -f "$SERVER_LIST" ]] && { echo "Error: $SERVER_LIST not found!"; exit 1; }
+
+echo "=========================================================="
+echo " Real-time Network Utilization (%): Sampling ${NET_SAMPLE_SEC}s"
+echo "=========================================================="
+
+while read -r server; do
+  [[ -z "$server" || "$server" =~ ^\s*# ]] && continue
+
+  echo -n "[$server] Sampling... "
+
+  delta=$($SSHPASS_BIN -p "$PASS" ssh -o StrictHostKeyChecking=no \
+    -o ConnectTimeout=$SSH_TIMEOUT $USER@"$server" \
+    "NET_SAMPLE_SEC=$NET_SAMPLE_SEC bash -c '
+    iface=\"$IFACE\"
+    if [[ -d /sys/class/net/\$iface ]]; then
+      rx1=\$(cat /sys/class/net/\$iface/statistics/rx_bytes)
+      tx1=\$(cat /sys/class/net/\$iface/statistics/tx_bytes)
+      sleep \$NET_SAMPLE_SEC
+      rx2=\$(cat /sys/class/net/\$iface/statistics/rx_bytes)
+      tx2=\$(cat /sys/class/net/\$iface/statistics/tx_bytes)
+      delta=\$(( (rx2 - rx1) + (tx2 - tx1) ))
+      echo \$delta
+    else
+      echo 0
+    fi'
+  ")
+
+  # Validate numeric output
+  [[ "$delta" =~ ^[0-9]+$ ]] || delta=0
+
+  # Calculate MB/s
+  mb_per_sec=$(awk -v d="$delta" -v s="$NET_SAMPLE_SEC" 'BEGIN{if(s>0) printf "%.6f", (d/(s*1024*1024)); else print "0"}')
+
+  # Calculate theoretical interface throughput (MB/s)
+  iface_speed_mb_per_sec=$(awk -v m="$IFACE_SPEED_Mbps" 'BEGIN{printf "%.6f", (m/8)}')
+
+  # Calculate utilization %
+  net_util_percent=$(awk -v a="$mb_per_sec" -v b="$iface_speed_mb_per_sec" \
+    'BEGIN{if(b>0) printf "%.2f", (a/b*100); else print "0.00"}')
+
+  printf "Transferred: %-12s bytes | Utilization: %6.2f%%\n" "$delta" "$net_util_percent"
+done < <(grep -v '^\s*#' "$SERVER_LIST" | sed '/^\s*$/d')
+
+echo "----------------------------------------------------------"
+echo "Test complete. Network utilization collected for all hosts."
+echo "----------------------------------------------------------"
