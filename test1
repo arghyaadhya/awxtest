@@ -1,9 +1,11 @@
 #!/bin/bash
 # ---------------------------------------------------------------------
-# Network Utilization Test for XenServer Hosts
+# XenServer Network Utilization Test (All Hosts in Pool)
 # ---------------------------------------------------------------------
-# Reads each host from servers.txt and calculates real-time
-# network utilization (%) using /sys/class/net/bond0 statistics.
+# - Reads pool masters from servers.txt
+# - Uses xe host-list to discover all pool members
+# - SSHes into each host and samples /sys/class/net/bond0 stats
+# - Calculates utilization % based on 2x10G = 20,000 Mbps
 # ---------------------------------------------------------------------
 
 USER="root"
@@ -12,55 +14,68 @@ SSHPASS_BIN="/usr/bin/sshpass"
 SERVER_LIST="/u/arghyaa/working-script/xs_report/servers.txt"
 SSH_TIMEOUT=15
 NET_SAMPLE_SEC=2
-
-# Adjust bond interface and speed (in Mbps) if needed
 IFACE="bond0"
-IFACE_SPEED_Mbps=20000  # 2×10G bonded = 20,000 Mbps
+IFACE_SPEED_Mbps=20000  # Adjust if different (e.g., 40000 for 2x20G)
 
 [[ ! -f "$SERVER_LIST" ]] && { echo "Error: $SERVER_LIST not found!"; exit 1; }
 
-echo "=========================================================="
-echo " Real-time Network Utilization (%): Sampling ${NET_SAMPLE_SEC}s"
-echo "=========================================================="
+echo "=============================================================="
+echo " XenServer Pool Network Utilization Test (bond0)"
+echo "=============================================================="
+echo "Sample interval: ${NET_SAMPLE_SEC}s | Interface speed: ${IFACE_SPEED_Mbps} Mbps"
+echo "--------------------------------------------------------------"
 
-while read -r server; do
-  [[ -z "$server" || "$server" =~ ^\s*# ]] && continue
+while read -r master; do
+  [[ -z "$master" || "$master" =~ ^\s*# ]] && continue
+  echo ""
+  echo ">>> Connecting to pool master: $master"
 
-  echo -n "[$server] Sampling... "
+  # Get all hosts in the pool
+  hosts=$($SSHPASS_BIN -p "$PASS" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=$SSH_TIMEOUT $USER@"$master" \
+    "xe host-list --minimal" 2>/dev/null | tr ',' ' ')
 
-  delta=$($SSHPASS_BIN -p "$PASS" ssh -o StrictHostKeyChecking=no \
-    -o ConnectTimeout=$SSH_TIMEOUT $USER@"$server" \
-    "NET_SAMPLE_SEC=$NET_SAMPLE_SEC bash -c '
-    iface=\"$IFACE\"
-    if [[ -d /sys/class/net/\$iface ]]; then
-      rx1=\$(cat /sys/class/net/\$iface/statistics/rx_bytes)
-      tx1=\$(cat /sys/class/net/\$iface/statistics/tx_bytes)
-      sleep \$NET_SAMPLE_SEC
-      rx2=\$(cat /sys/class/net/\$iface/statistics/rx_bytes)
-      tx2=\$(cat /sys/class/net/\$iface/statistics/tx_bytes)
-      delta=\$(( (rx2 - rx1) + (tx2 - tx1) ))
-      echo \$delta
-    else
-      echo 0
-    fi'
-  ")
+  [[ -z "$hosts" ]] && { echo "No hosts found in pool via $master"; continue; }
 
-  # Validate numeric output
-  [[ "$delta" =~ ^[0-9]+$ ]] || delta=0
+  for uuid in $hosts; do
+    host_name=$($SSHPASS_BIN -p "$PASS" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=$SSH_TIMEOUT $USER@"$master" \
+      "xe host-param-get uuid=$uuid param-name=name-label" 2>/dev/null)
 
-  # Calculate MB/s
-  mb_per_sec=$(awk -v d="$delta" -v s="$NET_SAMPLE_SEC" 'BEGIN{if(s>0) printf "%.6f", (d/(s*1024*1024)); else print "0"}')
+    host_ip=$($SSHPASS_BIN -p "$PASS" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=$SSH_TIMEOUT $USER@"$master" \
+      "xe host-param-get uuid=$uuid param-name=address" 2>/dev/null)
 
-  # Calculate theoretical interface throughput (MB/s)
-  iface_speed_mb_per_sec=$(awk -v m="$IFACE_SPEED_Mbps" 'BEGIN{printf "%.6f", (m/8)}')
+    [[ -z "$host_ip" ]] && { echo "[$host_name] Skipped: no management IP"; continue; }
 
-  # Calculate utilization %
-  net_util_percent=$(awk -v a="$mb_per_sec" -v b="$iface_speed_mb_per_sec" \
-    'BEGIN{if(b>0) printf "%.2f", (a/b*100); else print "0.00"}')
+    echo -n "[$host_name] ($host_ip) Sampling... "
 
-  printf "Transferred: %-12s bytes | Utilization: %6.2f%%\n" "$delta" "$net_util_percent"
+    delta=$($SSHPASS_BIN -p "$PASS" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=$SSH_TIMEOUT $USER@"$host_ip" \
+      "NET_SAMPLE_SEC=$NET_SAMPLE_SEC bash -c '
+      iface=\"$IFACE\"
+      if [[ -d /sys/class/net/\$iface ]]; then
+        rx1=\$(cat /sys/class/net/\$iface/statistics/rx_bytes)
+        tx1=\$(cat /sys/class/net/\$iface/statistics/tx_bytes)
+        sleep \$NET_SAMPLE_SEC
+        rx2=\$(cat /sys/class/net/\$iface/statistics/rx_bytes)
+        tx2=\$(cat /sys/class/net/\$iface/statistics/tx_bytes)
+        delta=\$(( (rx2 - rx1) + (tx2 - tx1) ))
+        echo \$delta
+      else
+        echo 0
+      fi'
+    ")
+
+    [[ "$delta" =~ ^[0-9]+$ ]] || delta=0
+
+    # Convert bytes to MB/s
+    mb_per_sec=$(awk -v d="$delta" -v s="$NET_SAMPLE_SEC" 'BEGIN{if(s>0) printf "%.6f",(d/(s*1024*1024)); else print "0"}')
+    iface_speed_mb_per_sec=$(awk -v m="$IFACE_SPEED_Mbps" 'BEGIN{printf "%.6f",(m/8)}')
+    net_util_percent=$(awk -v a="$mb_per_sec" -v b="$iface_speed_mb_per_sec" \
+      'BEGIN{if(b>0) printf "%.2f",(a/b*100); else print "0.00"}')
+
+    printf "ΔBytes: %-12s | %.3f MB/s | Util: %5.2f%%\n" "$delta" "$mb_per_sec" "$net_util_percent"
+  done
+
 done < <(grep -v '^\s*#' "$SERVER_LIST" | sed '/^\s*$/d')
 
-echo "----------------------------------------------------------"
-echo "Test complete. Network utilization collected for all hosts."
-echo "----------------------------------------------------------"
+echo "--------------------------------------------------------------"
+echo "Test complete: Network utilization per host in all pools."
+echo "--------------------------------------------------------------"
