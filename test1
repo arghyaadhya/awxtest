@@ -1,2 +1,21 @@
 NET_SAMPLE_SEC=2
-ssh root@host01 "NET_SAMPLE_SEC=$NET_SAMPLE_SEC bash -c 'iface=bond0; rx1=\$(cat /sys/class/net/\$iface/statistics/rx_bytes); tx1=\$(cat /sys/class/net/\$iface/statistics/tx_bytes); sleep \$NET_SAMPLE_SEC; rx2=\$(cat /sys/class/net/\$iface/statistics/rx_bytes); tx2=\$(cat /sys/class/net/\$iface/statistics/tx_bytes); echo \$(echo \$(( (rx2 - rx1) + (tx2 - tx1) )));'"
+host_ip="host01"
+PASS="justD0it!"
+SSHPASS_BIN="/usr/bin/sshpass"
+SSH_TIMEOUT=15
+
+net_sample=$($SSHPASS_BIN -p "$PASS" ssh -o StrictHostKeyChecking=no \
+  -o ConnectTimeout=$SSH_TIMEOUT root@"$host_ip" \
+  "NET_SAMPLE_SEC=$NET_SAMPLE_SEC bash -c 'iface=bond0;
+if [[ -d /sys/class/net/\$iface ]]; then
+  rx1=\$(cat /sys/class/net/\$iface/statistics/rx_bytes)
+  tx1=\$(cat /sys/class/net/\$iface/statistics/rx_bytes)
+  sleep \$NET_SAMPLE_SEC
+  rx2=\$(cat /sys/class/net/\$iface/statistics/rx_bytes)
+  tx2=\$(cat /sys/class/net/\$iface/statistics/rx_bytes)
+  delta=\$(( (rx2 - rx1) + (tx2 - tx1) ))
+  echo \$delta
+else
+  echo 0
+fi'")
+echo "Bytes transferred in ${NET_SAMPLE_SEC}s: $net_sample"
