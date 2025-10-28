@@ -1,11 +1,11 @@
 #!/bin/bash
 # ---------------------------------------------------------------------
-# XenServer Network Utilization Test (All Hosts in Pool)
+# XenServer Network Utilization Test (Multi-Pool, All Hosts)
 # ---------------------------------------------------------------------
-# - Reads pool masters from servers.txt
-# - Uses xe host-list to discover all pool members
-# - SSHes into each host and samples /sys/class/net/bond0 stats
-# - Calculates utilization % based on 2x10G = 20,000 Mbps
+# - Reads all pool masters from servers.txt
+# - For each master, discovers all hosts in its pool
+# - Samples /sys/class/net/bond0 RX/TX counters via SSH per host
+# - Computes real-time utilization (%)
 # ---------------------------------------------------------------------
 
 USER="root"
@@ -15,22 +15,32 @@ SERVER_LIST="/u/arghyaa/working-script/xs_report/servers.txt"
 SSH_TIMEOUT=15
 NET_SAMPLE_SEC=2
 IFACE="bond0"
-IFACE_SPEED_Mbps=20000  # Adjust if different (e.g., 40000 for 2x20G)
+IFACE_SPEED_Mbps=20000  # e.g. 2x10G bonded NICs
 
 [[ ! -f "$SERVER_LIST" ]] && { echo "Error: $SERVER_LIST not found!"; exit 1; }
 
+# Read all masters first
+mapfile -t POOL_MASTERS < <(grep -v '^\s*#' "$SERVER_LIST" | sed '/^\s*$/d')
+
 echo "=============================================================="
-echo " XenServer Pool Network Utilization Test (bond0)"
+echo " XenServer Multi-Pool Network Utilization Test (bond0)"
 echo "=============================================================="
-echo "Sample interval: ${NET_SAMPLE_SEC}s | Interface speed: ${IFACE_SPEED_Mbps} Mbps"
+echo "Sampling interval: ${NET_SAMPLE_SEC}s | Interface speed: ${IFACE_SPEED_Mbps} Mbps"
 echo "--------------------------------------------------------------"
 
-while read -r master; do
-  [[ -z "$master" || "$master" =~ ^\s*# ]] && continue
+for master in "${POOL_MASTERS[@]}"; do
+  [[ -z "$master" ]] && continue
   echo ""
   echo ">>> Connecting to pool master: $master"
 
-  # Get all hosts in the pool
+  # Get pool name
+  pool_name=$($SSHPASS_BIN -p "$PASS" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=$SSH_TIMEOUT $USER@"$master" \
+    "xe pool-list params=name-label --minimal" 2>/dev/null)
+  [[ -z "$pool_name" ]] && pool_name="Standalone_Host"
+
+  echo "Pool detected: $pool_name"
+
+  # Get all hosts (master + slaves) in the pool
   hosts=$($SSHPASS_BIN -p "$PASS" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=$SSH_TIMEOUT $USER@"$master" \
     "xe host-list --minimal" 2>/dev/null | tr ',' ' ')
 
@@ -43,9 +53,9 @@ while read -r master; do
     host_ip=$($SSHPASS_BIN -p "$PASS" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=$SSH_TIMEOUT $USER@"$master" \
       "xe host-param-get uuid=$uuid param-name=address" 2>/dev/null)
 
-    [[ -z "$host_ip" ]] && { echo "[$host_name] Skipped: no management IP"; continue; }
+    [[ -z "$host_ip" ]] && { echo "[$pool_name][$host_name] Skipped: no management IP"; continue; }
 
-    echo -n "[$host_name] ($host_ip) Sampling... "
+    echo -n "[$pool_name][$host_name] ($host_ip) Sampling... "
 
     delta=$($SSHPASS_BIN -p "$PASS" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=$SSH_TIMEOUT $USER@"$host_ip" \
       "NET_SAMPLE_SEC=$NET_SAMPLE_SEC bash -c '
@@ -65,7 +75,7 @@ while read -r master; do
 
     [[ "$delta" =~ ^[0-9]+$ ]] || delta=0
 
-    # Convert bytes to MB/s
+    # Convert to MB/s and utilization %
     mb_per_sec=$(awk -v d="$delta" -v s="$NET_SAMPLE_SEC" 'BEGIN{if(s>0) printf "%.6f",(d/(s*1024*1024)); else print "0"}')
     iface_speed_mb_per_sec=$(awk -v m="$IFACE_SPEED_Mbps" 'BEGIN{printf "%.6f",(m/8)}')
     net_util_percent=$(awk -v a="$mb_per_sec" -v b="$iface_speed_mb_per_sec" \
@@ -73,9 +83,8 @@ while read -r master; do
 
     printf "ΔBytes: %-12s | %.3f MB/s | Util: %5.2f%%\n" "$delta" "$mb_per_sec" "$net_util_percent"
   done
-
-done < <(grep -v '^\s*#' "$SERVER_LIST" | sed '/^\s*$/d')
+done
 
 echo "--------------------------------------------------------------"
-echo "Test complete: Network utilization per host in all pools."
+echo "Test complete: Network utilization per host across all pools."
 echo "--------------------------------------------------------------"
