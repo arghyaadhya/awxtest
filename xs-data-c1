@@ -22,7 +22,7 @@ DATESTAMP=$(date +%Y-%m-%d_%H-%M)
 MASTER_INDEX="$TMP_DIR/xenpool_index_${DATESTAMP}.csv"
 NET_SAMPLE_SEC=2
 IFACE="bond0"
-IFACE_SPEED_Mbps=20000   # 2×10 Gb
+IFACE_SPEED_Mbps=20000     # 2×10 Gbps
 DEBUG=true
 # ------------------------------------------------
 
@@ -34,7 +34,9 @@ echo "=============================================================="
 echo " Citrix XenServer Multi-Pool SSH Collector (Final V23)"
 echo "=============================================================="
 
-# --- Remote Script (executed on each pool master) ---
+# ---------------------------------------------------------------------
+# Remote script executed on each XenServer pool master
+# ---------------------------------------------------------------------
 read -r -d '' REMOTE_SCRIPT <<'EOF'
 timestamp=$(date +"%Y-%m-%d_%H-%M")
 csv_file="/tmp/xenpool_summary_${timestamp}.csv"
@@ -76,7 +78,7 @@ for uuid in $hosts; do
   ht_state=$( [[ -f /sys/devices/system/cpu/smt/active ]] && grep -q 1 /sys/devices/system/cpu/smt/active && echo "Enabled" || echo "Disabled" )
   uptime_days=$(awk '{print int($1/86400)}' /proc/uptime)
 
-  # --- SSH-based bond0 network sampling ---
+  # --- SSH-based per-host network sampling (bond0) ---
   net_sample=$($SSHPASS_BIN -p "$PASS" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=$SSH_TIMEOUT root@"$host_ip" \
     "NET_SAMPLE_SEC=$NET_SAMPLE_SEC IFACE='$IFACE' bash -c '
       if [[ -d /sys/class/net/\$IFACE ]]; then
@@ -96,7 +98,7 @@ for uuid in $hosts; do
 
   if [[ "$DEBUG" == "true" ]]; then
     echo "DEBUG_NET: ${site_name}/${pool_name}/${host_name} → ${net_util_percent}% (${mb_per_sec} MB/s)"
-    echo "DEBUG_NET_UTIL: host=${host_name}, iface=${IFACE}, util=${net_util_percent}%, rate=${mb_per_sec} MB/s" >> "$debug_file"
+    echo "DEBUG_NET_UTIL: host=${host_name}, iface=${IFACE}, util=${net_util_percent}%, rate=${mb_per_sec}MB/s" >> "$debug_file"
   fi
 
   cpu_util_percent=$(awk -v la="$load_avg" -v c="$cpu" 'BEGIN{if(c>0) printf "%.1f",(la/c*100); else print "0.0"}')
@@ -107,7 +109,6 @@ for uuid in $hosts; do
   sum_net_util=$(awk -v a="$sum_net_util" -v b="$net_util_percent" 'BEGIN{printf "%.6f",a+b}')
   host_util_count=$((host_util_count+1))
 
-  # --- Local SRs only ---
   sr_found=false
   for sr_uuid in $(xe sr-list --minimal 2>/dev/null | tr ',' ' '); do
     sr_name=$(xe sr-param-get uuid="$sr_uuid" param-name=name-label)
@@ -162,21 +163,28 @@ echo "summary,${site_name},${pool_name},${total_cpu},${total_mem_total},${total_
 echo "${pool_name},${csv_file}"
 EOF
 
-# --- Collect from masters ---
+# ---------------------------------------------------------------------
+# Collect results, merge, and cleanup
+# ---------------------------------------------------------------------
 while read -r server; do
   [[ -z "$server" || "$server" =~ ^\s*# ]] && continue
   echo "Collecting data from $server ..."
-  result=$($SSHPASS_BIN -p "$PASS" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=$SSH_TIMEOUT "$USER@$server" "bash -s" <<< "$REMOTE_SCRIPT" 2>/dev/null)
+  result=$($SSHPASS_BIN -p "$PASS" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=$SSH_TIMEOUT \
+    "$USER@$server" "bash -s" <<< "$REMOTE_SCRIPT" 2>/dev/null)
+
   pool_name=$(echo "$result" | awk -F',' '{print $1}')
   remote_csv=$(echo "$result" | awk -F',' '{print $2}')
   [[ -z "$pool_name" || -z "$remote_csv" ]] && continue
+
   clean_pool=$(echo "$pool_name" | tr -dc 'A-Za-z0-9_-')
   local_csv="${TMP_DIR}/${clean_pool}_${DATESTAMP}.csv"
-  $SSHPASS_BIN -p "$PASS" scp -o StrictHostKeyChecking=no -o ConnectTimeout=$SSH_TIMEOUT "$USER@$server:$remote_csv" "$local_csv" >/dev/null 2>&1
+
+  $SSHPASS_BIN -p "$PASS" scp -o StrictHostKeyChecking=no -o ConnectTimeout=$SSH_TIMEOUT \
+    "$USER@$server:$remote_csv" "$local_csv" >/dev/null 2>&1
+
   [[ -f "$local_csv" ]] && echo "${pool_name},${server},${local_csv}" >> "$MASTER_INDEX"
 done < <(grep -v '^\s*#' "$SERVER_LIST" | sed '/^\s*$/d')
 
-# --- Merge ---
 MERGED_CSV="${TMP_DIR}/xenpool_final_merged.csv"
 > "$MERGED_CSV"
 TMP_HOSTS="${TMP_DIR}/tmp_hosts_merge.csv"
@@ -205,4 +213,27 @@ sort -t, -k3,3 -u "$TMP_SUMMARY" -o "$TMP_SUMMARY"
   cat "$TMP_NFS"
   echo ""
   echo "#POOL SUMMARY (All Pools)"
-  echo "#KEYWORD,SITE NAME,POOL NAME,CPU Cores,Memory Total (GB),Memory Used (GB),Memory Free (GB),Usable Memory (GB),SR Used (GB),SR Free (GB),Running VMs,16GB VM
+  echo "#KEYWORD,SITE NAME,POOL NAME,CPU Cores,Memory Total (GB),Memory Used (GB),Memory Free (GB),Usable Memory (GB),SR Used (GB),SR Free (GB),Running VMs,16GB VM Capacity (Approx),32GB VM Capacity (Approx),CPU Utilization (%),Memory Utilization (%),Network Utilization (%)"
+  cat "$TMP_SUMMARY"
+} > "$MERGED_CSV"
+
+echo "Merged CSV successfully written to: $MERGED_CSV"
+
+# Cleanup
+echo "Starting cleanup..."
+mapfile -t SERVER_ARRAY < <(grep -v '^\s*#' "$SERVER_LIST" | sed '/^\s*$/d')
+for server in "${SERVER_ARRAY[@]}"; do
+  [[ -z "$server" ]] && continue
+  echo "Cleaning remote temporary files on $server ..."
+  $SSHPASS_BIN -p "$PASS" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=$SSH_TIMEOUT \
+    "$USER@$server" "rm -f /tmp/xenpool_summary_*.csv /tmp/xenpool_net_debug_*.log >/dev/null 2>&1" || true
+done
+
+echo "Cleaning local temp directory: $TMP_DIR ..."
+find "$TMP_DIR" -type f ! -name "xenpool_final_merged.csv" -exec rm -f {} + 2>/dev/null || true
+
+cp "$MERGED_CSV" /u/arghyaa/ctx-report/ 2>/dev/null || true
+echo "Cleanup completed. Final report: $MERGED_CSV"
+
+rm -f "$LOCKFILE" 2>/dev/null || true
+exit 0
