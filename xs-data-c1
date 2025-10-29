@@ -228,4 +228,31 @@ mapfile -t SERVER_ARRAY < <(grep -v '^\s*#' "$SERVER_LIST" | sed '/^\s*$/d')
 for server in "${SERVER_ARRAY[@]}"; do
   [[ -z "$server" ]] && continue
   echo "Cleaning remote temporary files on $server ..."
-  $SSHPASS_BIN -p "$PASS"
+  $SSHPASS_BIN -p "$PASS" ssh \
+    -o StrictHostKeyChecking=no \
+    -o ConnectTimeout=$SSH_TIMEOUT \
+    "$USER@$server" \
+    "rm -f /tmp/xenpool_summary_*.csv /tmp/xenpool_net_debug_*.log >/dev/null 2>&1" || true
+done
+
+# --- Local cleanup: keep only merged CSV ---
+echo "Cleaning local temp directory: $TMP_DIR ..."
+find "$TMP_DIR" -type f ! -name "xenpool_final_merged.csv" -exec rm -f {} + 2>/dev/null || true
+
+# --- Copy merged CSV to report directory ---
+if cp "$MERGED_CSV" /u/arghyaa/ctx-report/ 2>/dev/null; then
+  echo "Final report copied to /u/arghyaa/ctx-report/"
+else
+  echo "Warning: Could not copy report to /u/arghyaa/ctx-report/, please check permissions."
+fi
+
+# --- Final message ---
+echo ""
+echo "Cleanup completed successfully."
+echo "Merged report available at:"
+echo "  $MERGED_CSV"
+[[ "$DEBUG" == "true" ]] && echo "DEBUG: Temporary and remote files removed."
+
+# --- Remove lock file and exit ---
+rm -f "$LOCKFILE" 2>/dev/null || true
+exit 0
