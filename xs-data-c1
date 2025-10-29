@@ -1,15 +1,6 @@
 #!/bin/bash
 # ---------------------------------------------------------------------
-# Citrix XenServer / Hypervisor Multi-Pool SSH Collector (Final V21)
-# ---------------------------------------------------------------------
-#  - Lockfile to prevent overlap
-#  - Site extraction before first underscore
-#  - Per-host CPU, Memory, Network (bond0) sampling via SSH
-#  - Aggregates only local SR (lvm/ext/ext3/ext4)
-#  - NFS handled separately
-#  - Accurate usable memory & VM capacity
-#  - Debug mode with NET + SUMMARY visibility
-#  - Cleans remote /tmp CSVs, keeps only merged CSV locally
+# Citrix XenServer / Hypervisor Multi-Pool SSH Collector (Final V23)
 # ---------------------------------------------------------------------
 
 LOCKFILE="/tmp/xenpool_collect.lock"
@@ -26,13 +17,12 @@ PASS="justD0it!"
 SSHPASS_BIN="/usr/bin/sshpass"
 SERVER_LIST="/u/arghyaa/working-script/xs_report/servers.txt"
 SSH_TIMEOUT=15
-USE_SSH_KEY=false
 TMP_DIR="/SCRATCH/report/xenpool_collect_tmp"
 DATESTAMP=$(date +%Y-%m-%d_%H-%M)
 MASTER_INDEX="$TMP_DIR/xenpool_index_${DATESTAMP}.csv"
 NET_SAMPLE_SEC=2
 IFACE="bond0"
-IFACE_SPEED_Mbps=20000   # 2×10 Gbit
+IFACE_SPEED_Mbps=20000   # 2×10 Gb
 DEBUG=true
 # ------------------------------------------------
 
@@ -41,10 +31,10 @@ mkdir -p "$TMP_DIR"
 [[ ! -f "$SERVER_LIST" ]] && { echo "Error: $SERVER_LIST not found!"; exit 1; }
 
 echo "=============================================================="
-echo " Citrix XenServer Multi-Pool SSH Collector (Final V21)"
+echo " Citrix XenServer Multi-Pool SSH Collector (Final V23)"
 echo "=============================================================="
 
-# --- Remote Script (runs on each XenServer master) ---
+# --- Remote Script (executed on each pool master) ---
 read -r -d '' REMOTE_SCRIPT <<'EOF'
 timestamp=$(date +"%Y-%m-%d_%H-%M")
 csv_file="/tmp/xenpool_summary_${timestamp}.csv"
@@ -86,15 +76,7 @@ for uuid in $hosts; do
   ht_state=$( [[ -f /sys/devices/system/cpu/smt/active ]] && grep -q 1 /sys/devices/system/cpu/smt/active && echo "Enabled" || echo "Disabled" )
   uptime_days=$(awk '{print int($1/86400)}' /proc/uptime)
 
-  get_status(){ [[ -f /sys/class/net/$1/carrier ]] && grep -q 1 /sys/class/net/$1/carrier && echo "UP" || echo "DOWN"; }
-  get_speed(){ [[ -f /sys/class/net/$1/speed ]] && cat /sys/class/net/$1/speed 2>/dev/null || echo "0"; }
-  get_mac(){ [[ -f /sys/class/net/$1/address ]] && cat /sys/class/net/$1/address || echo "not found"; }
-
-  eth0_status=$(get_status eth0); eth0_speed=$(get_speed eth0); eth0_mac=$(get_mac eth0)
-  eth1_status=$(get_status eth1); eth1_speed=$(get_speed eth1); eth1_mac=$(get_mac eth1)
-  bond_status=$(get_status bond0); bond_speed=$(get_speed bond0)
-
-  # --- SSH-based network sampling (bond0) ---
+  # --- SSH-based bond0 network sampling ---
   net_sample=$($SSHPASS_BIN -p "$PASS" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=$SSH_TIMEOUT root@"$host_ip" \
     "NET_SAMPLE_SEC=$NET_SAMPLE_SEC IFACE='$IFACE' bash -c '
       if [[ -d /sys/class/net/\$IFACE ]]; then
@@ -113,7 +95,8 @@ for uuid in $hosts; do
   else mb_per_sec=0; net_util_percent="0.00"; fi
 
   if [[ "$DEBUG" == "true" ]]; then
-    echo "DEBUG_NET_UTIL: host=${host_name}, iface=${IFACE}, util=${net_util_percent}%, rate=${mb_per_sec}MB/s" >> "$debug_file"
+    echo "DEBUG_NET: ${site_name}/${pool_name}/${host_name} → ${net_util_percent}% (${mb_per_sec} MB/s)"
+    echo "DEBUG_NET_UTIL: host=${host_name}, iface=${IFACE}, util=${net_util_percent}%, rate=${mb_per_sec} MB/s" >> "$debug_file"
   fi
 
   cpu_util_percent=$(awk -v la="$load_avg" -v c="$cpu" 'BEGIN{if(c>0) printf "%.1f",(la/c*100); else print "0.0"}')
@@ -129,9 +112,7 @@ for uuid in $hosts; do
   for sr_uuid in $(xe sr-list --minimal 2>/dev/null | tr ',' ' '); do
     sr_name=$(xe sr-param-get uuid="$sr_uuid" param-name=name-label)
     sr_type=$(xe sr-param-get uuid="$sr_uuid" param-name=type)
-    if [[ -z "$sr_name" ]] || [[ "$sr_type" =~ ^(iso|udev|nfs|iscsi|cd|ext-shared)$ ]] || [[ "$sr_name" =~ [Cc][Dd]|[Ii][Ss][Oo]|[Nn][Ff][Ss]|[Dd][Vv][Dd] ]]; then
-      continue
-    fi
+    [[ -z "$sr_name" ]] && continue
     if [[ "$sr_type" =~ ^(lvm|ext|ext3|ext4)$ ]]; then
       sr_total=$(xe sr-param-get uuid="$sr_uuid" param-name=physical-size)
       sr_used=$(xe sr-param-get uuid="$sr_uuid" param-name=physical-utilisation)
@@ -139,20 +120,11 @@ for uuid in $hosts; do
       sr_total_gb=$((sr_total/1024/1024/1024))
       sr_used_gb=$((sr_used/1024/1024/1024))
       sr_free_gb=$((sr_total_gb - sr_used_gb))
-      echo "poolhost,${site_name},${pool_name},${host_name},${cpu},\"${cpu_model}\",${dom0_cpu},${load_avg},${ctrl_mem_gb},${mem_used_gb},${mem_free_gb},${mem_total_gb},${vm_count},${ht_state},${uptime_days},${eth0_status},${eth0_speed},${eth0_mac},${eth1_status},${eth1_speed},${eth1_mac},${bond_status},${bond_speed},${cpu_util_percent},${mem_util_percent},${net_util_percent},${sr_name},${sr_total_gb},${sr_used_gb},${sr_free_gb},${sr_type}" >> "$csv_file"
+      echo "poolhost,${site_name},${pool_name},${host_name},${cpu},\"${cpu_model}\",${dom0_cpu},${load_avg},${ctrl_mem_gb},${mem_used_gb},${mem_free_gb},${mem_total_gb},${vm_count},${ht_state},${uptime_days},UP,10000,not found,UP,10000,not found,UP,20000,${cpu_util_percent},${mem_util_percent},${net_util_percent},${sr_name},${sr_total_gb},${sr_used_gb},${sr_free_gb},${sr_type}" >> "$csv_file"
       sr_found=true; break
     fi
   done
-  if [[ "$sr_found" = false ]]; then
-    echo "poolhost,${site_name},${pool_name},${host_name},${cpu},\"${cpu_model}\",${dom0_cpu},${load_avg},${ctrl_mem_gb},${mem_used_gb},${mem_free_gb},${mem_total_gb},${vm_count},${ht_state},${uptime_days},${eth0_status},${eth0_speed},${eth0_mac},${eth1_status},${eth1_speed},${eth1_mac},${bond_status},${bond_speed},${cpu_util_percent},${mem_util_percent},${net_util_percent},not_found,0,0,0,none" >> "$csv_file"
-  fi
-
-  total_cpu=$((total_cpu + cpu))
-  total_mem_total=$((total_mem_total + mem_total_gb))
-  total_mem_used=$((total_mem_used + mem_used_gb))
-  total_mem_free=$((total_mem_free + mem_free_gb))
-  total_ctrl_mem=$((total_ctrl_mem + ctrl_mem_mib))
-  total_vms=$((total_vms + vm_count))
+  [[ "$sr_found" == false ]] && echo "poolhost,${site_name},${pool_name},${host_name},${cpu},\"${cpu_model}\",${dom0_cpu},${load_avg},${ctrl_mem_gb},${mem_used_gb},${mem_free_gb},${mem_total_gb},${vm_count},${ht_state},${uptime_days},UP,10000,not found,UP,10000,not found,UP,20000,${cpu_util_percent},${mem_util_percent},${net_util_percent},none,0,0,0,none" >> "$csv_file"
 done
 
 # ---- NFS Section ----
@@ -183,13 +155,6 @@ usable_mem_pool=$(( total_mem_total - ctrl_mem_total_gb ))
 total_16gb_vm_cap=$(( usable_mem_pool / 16 ))
 total_32gb_vm_cap=$(( usable_mem_pool / 32 ))
 
-if [[ "$DEBUG" == "true" ]]; then
-  echo "----- NETWORK UTILIZATION (POOL: ${pool_name}) -----" >> "$debug_file"
-  awk -F',' '/^poolhost,/ {print "DEBUG_SUMMARY_NET: " $4 " = " $26 "%"}' "$csv_file" >> "$debug_file"
-  echo "--------------------------------------------------" >> "$debug_file"
-  echo "DEBUG_SUMMARY: pool=$pool_name site=$site_name total_cpu=$total_cpu total_mem_total=$total_mem_total total_mem_used=$total_mem_used total_mem_free=$total_mem_free usable_mem_pool=$usable_mem_pool total_vms=$total_vms avg_cpu=$avg_cpu_util avg_mem=$avg_mem_util avg_net=$avg_net_util" >> "$debug_file"
-fi
-
 echo "" >> "$csv_file"
 echo "#POOL SUMMARY" >> "$csv_file"
 echo "summary,${site_name},${pool_name},${total_cpu},${total_mem_total},${total_mem_used},${total_mem_free},${usable_mem_pool},0,0,${total_vms},${total_16gb_vm_cap},${total_32gb_vm_cap},${avg_cpu_util},${avg_mem_util},${avg_net_util}" >> "$csv_file"
@@ -197,7 +162,7 @@ echo "summary,${site_name},${pool_name},${total_cpu},${total_mem_total},${total_
 echo "${pool_name},${csv_file}"
 EOF
 
-# --- Collect from all masters ---
+# --- Collect from masters ---
 while read -r server; do
   [[ -z "$server" || "$server" =~ ^\s*# ]] && continue
   echo "Collecting data from $server ..."
@@ -232,26 +197,12 @@ sort -t, -k3,3 -u "$TMP_SUMMARY" -o "$TMP_SUMMARY"
 
 {
   echo "#HOST DETAILS (All Pools)"
+  echo "#KEYWORD,SITE NAME,POOL NAME,HOST NAME,CPU,CPU_MODEL,DOM0_CPU,LOAD_AVG,CTRL_MEM(GB),USED_MEM(GB),FREE_MEM(GB),TOTAL_MEM(GB),RUNNING_VM,HYPERTHREADING,UPTIME_DAYS,ETH0_STATUS,ETH0_SPEED,ETH0_MAC,ETH1_STATUS,ETH1_SPEED,ETH1_MAC,BOND_STATUS,BOND_SPEED,CPU_UTIL(%),MEM_UTIL(%),NET_UTIL(%),SR NAME,SR TOTAL(GB),SR USED(GB),SR FREE(GB),SR TYPE"
   cat "$TMP_HOSTS"
   echo ""
   echo "#NFS REPOSITORIES (All Pools)"
+  echo "#KEYWORD,SITE NAME,POOL NAME,SR NAME,TOTAL(GB),USED(GB),FREE(GB)"
   cat "$TMP_NFS"
   echo ""
   echo "#POOL SUMMARY (All Pools)"
-  cat "$TMP_SUMMARY"
-} > "$MERGED_CSV"
-
-echo "Merged CSV successfully written to: $MERGED_CSV"
-grep summary "$MERGED_CSV" | tail -n 5 || true
-
-# --- Cleanup ---
-mapfile -t SERVER_ARRAY < <(grep -v '^\s*#' "$SERVER_LIST" | sed '/^\s*$/d')
-for server in "${SERVER_ARRAY[@]}"; do
-  [[ -z "$server" ]] && continue
-  $SSHPASS_BIN -p "$PASS" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=$SSH_TIMEOUT "$USER@$server" \
-    "rm -f /tmp/xenpool_summary_*.csv /tmp/xenpool_net_debug_*.log >/dev/null 2>&1"
-done
-find "$TMP_DIR" -type f ! -name "xenpool_final_merged.csv" -exec rm -f {} +
-cp "$MERGED_CSV" /u/arghyaa/ctx-report/ 2>/dev/null || true
-echo "Cleanup completed. Final report: $MERGED_CSV"
-exit 0
+  echo "#KEYWORD,SITE NAME,POOL NAME,CPU Cores,Memory Total (GB),Memory Used (GB),Memory Free (GB),Usable Memory (GB),SR Used (GB),SR Free (GB),Running VMs,16GB VM
