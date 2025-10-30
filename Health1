@@ -1,0 +1,185 @@
+#!/bin/bash
+# ---------------------------------------------------------------------
+# Citrix XenServer / Hypervisor Health Check (Remote + Cron-ready)
+# ---------------------------------------------------------------------
+# Original logic preserved; fixes + progress added
+# ---------------------------------------------------------------------
+
+LANG=C
+set -euo pipefail
+
+# ===== Configuration =====
+SERVER_LIST_FILE="/etc/citrix/server_list.txt"     # One server per line
+USERNAME="citrixadmin"
+PASSWORD="MyP@ssword123"
+LOAD_THRESHOLD=3
+MAX_PARALLEL=3
+ADMIN_REPORT_DIR="/var/log/citrix_remote_reports"
+LOCKFILE="/tmp/citrix_healthcheck.lock"
+TIMESTAMP="$(date +%F_%H-%M)"
+FINAL_REPORT="$ADMIN_REPORT_DIR/final_citrix_healthcheck_${TIMESTAMP}.log"
+
+# ===== Setup =====
+mkdir -p "$ADMIN_REPORT_DIR"
+exec 200>"$LOCKFILE"
+flock -n 200 || { echo "⚠️ Another healthcheck is running. Exiting."; exit 0; }
+
+echo "===== [Citrix Remote Health Check Started at $(date)] =====" | tee "$FINAL_REPORT"
+
+# ===== Spinner (for visual progress) =====
+spinner() {
+    local pid=$1
+    local spin='|/-\\'
+    local i=0
+    while kill -0 "$pid" 2>/dev/null; do
+        i=$(( (i+1) %4 ))
+        printf "\r[%c] Running remote checks..." "${spin:$i:1}"
+        sleep 0.2
+    done
+    printf "\r[✔] Done.%-20s\n"
+}
+
+# ===== Function to run healthcheck remotely =====
+run_healthcheck_remote() {
+    local host="$1"
+    echo "[$(date +%H:%M)] Starting check on $host ..."
+    sshpass -p "$PASSWORD" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 "$USERNAME@$host" "LOAD_THRESHOLD=$LOAD_THRESHOLD bash -s" <<'EOF'
+#!/bin/bash
+LANG=C
+report="/var/log/citrix_healthcheck_$(date +%F_%H-%M).log"
+mkdir -p /var/log
+exec > >(tee -a "$report") 2>&1
+
+echo "===== [System Information: $(hostname)] ====="
+echo "Uptime: $(uptime -p)"
+echo "CPU Load: $(uptime | awk -F'load average[s]?: ' '{print $2}')"
+echo
+echo "Memory Usage:"
+free -h
+echo
+
+# ===== Load Check =====
+load=$(uptime | awk -F'load average[s]?: ' '{print $2}' | cut -d',' -f1 | tr -d ' ')
+if (( ${load%%.*} < LOAD_THRESHOLD )); then
+    echo "Load below threshold ($load < $LOAD_THRESHOLD). Skipping detailed check."
+    echo "===== [Report Saved To] ====="
+    echo "$report"
+    exit 0
+fi
+
+# ===== Original Logic =====
+echo "===== [User Session Info] ====="
+all_users=$(ctxqsession 2>/dev/null | awk 'NR>2 {print $2}' | sort -u)
+active_disconnected_users=$(ctxqsession 2>/dev/null | grep -i -e "Active" -e "Disconnected" -e "disc" | awk '{print $2}' | sort -u)
+leftover_users=$(comm -23 <(echo "$all_users" | sort -u) <(echo "$active_disconnected_users" | sort -u))
+
+if [ -z "$leftover_users" ]; then
+    echo "No Citrix users with leftover process"
+else
+    echo "===== [Leftover User Processes] ====="
+    for user in $leftover_users; do
+        clean_user=$(echo "$user" | awk -F'\\' '{print $NF}')
+        if id "$clean_user" &>/dev/null; then
+            ps -u "$clean_user" -o pid,comm --no-headers \
+            | grep -Ev '^(systemd|dbus|sshd|cron|bash|sh|citrix|ctx|postgres|mate|xfce|gnome|pulseaudio|gvfs|Xorg|xrdp|lightdm|login)' \
+            | awk -v u="$clean_user" 'NR==1{print "User:", u} {printf "PID: %-6s CMD: %s\n", $1, $2}'
+        fi
+    done
+fi
+
+# ===== ctxgfx Process Session ID Check =====
+echo
+echo "===== [ctxgfx Process Session ID Mismatch] ====="
+valid_sessions=$(ctxquser 2>/dev/null | awk 'NR>1 {split($2,a,":"); print a[2]}')
+ps_ctxgfx=$(ps -ef | grep session | grep ctxgfx)
+
+mismatch_found=false
+while read -r line; do
+    [ -z "$line" ] && continue
+    ps_sessid=$(echo "$line" | awk '{print $NF}')
+    if ! grep -qx "$ps_sessid" <<< "$valid_sessions"; then
+        echo "$line"
+        mismatch_found=true
+    fi
+done <<< "$ps_ctxgfx"
+
+if [ "$mismatch_found" = false ]; then
+    echo "All ctxgfx processes match valid session IDs"
+fi
+
+# ===== Error Checks =====
+echo
+echo "===== [Error Checks] ====="
+dmesg | grep -iE 'nfs|autofs|ssd' | head -n 1 | grep -q . && \
+    echo "System Error Detected: $(dmesg | grep -iE 'nfs|autofs|ssd' | head -n 1)" || \
+    echo "No NFS/Autofs/SSD errors found."
+
+# ===== GVFS Cache =====
+echo
+echo "===== [GVFS Cache Issues] ====="
+gvfs_count=$(ps -ef | grep gvfs | grep -v grep | wc -l)
+if (( gvfs_count > 10 )); then
+    echo "Potential GVFS cache issue detected: $gvfs_count gvfs processes running"
+else
+    echo "No GVFS cache issue detected."
+fi
+
+# ===== Hung NFS Mounts =====
+hung_list=""
+while read -r mnt; do
+    if ! timeout 10 stat "$mnt" >/dev/null 2>&1; then
+        hung_list+="$mnt : HUNG"$'\n'
+    fi
+done < <(mount | awk '/ nfs / {print $3}')
+
+if [ -n "$hung_list" ]; then
+    echo
+    echo "===== [Hung NFS Mounts] ====="
+    echo "$hung_list"
+fi
+
+echo
+echo "===== [Report Saved To] ====="
+echo "$report"
+EOF
+}
+
+# ====== Controlled Parallel Execution ======
+echo
+echo "===== [Starting Remote Checks] ====="
+job_count=0
+while IFS= read -r server || [[ -n "$server" ]]; do
+    [[ -z "$server" || "$server" =~ ^# ]] && continue
+    run_healthcheck_remote "$server" >"$ADMIN_REPORT_DIR/${server}_report.log" 2>&1 &
+    ((job_count++))
+    if (( job_count >= MAX_PARALLEL )); then
+        wait -n
+        ((job_count--))
+    fi
+done < "$SERVER_LIST_FILE"
+
+wait
+echo
+echo "===== [All Remote Checks Completed] ====="
+
+# ====== Summary ======
+echo "===== [SUMMARY REPORT] =====" > "$FINAL_REPORT"
+for log in "$ADMIN_REPORT_DIR"/*_report.log; do
+    host=$(basename "$log" _report.log)
+    issue="OK"
+
+    grep -q "GVFS cache issue" "$log" && issue="GVFS cache issue"
+    grep -q "System Error Detected" "$log" && issue="NFS/Autofs/SSD error"
+    grep -q "HUNG" "$log" && issue="Hung NFS mount"
+    grep -q "leftover process" "$log" && issue="Leftover Citrix user"
+    grep -q "Load below threshold" "$log" && issue="Load below threshold (Skipped)"
+
+    echo "$host : $issue" >> "$FINAL_REPORT"
+done
+
+echo
+echo "===== [Final Summary Saved To] ====="
+echo "$FINAL_REPORT"
+
+flock -u 200
+rm -f "$LOCKFILE"
