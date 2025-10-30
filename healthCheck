@@ -1,0 +1,81 @@
+#!/bin/bash
+LANG=C
+
+# ===== Setup Report File =====
+report="/var/log/citrix_healthcheck_$(date +%F_%H-%M).log"
+mkdir -p /var/log
+exec > >(tee -a "$report") 2>&1
+
+# ===== Basic System Info =====
+echo "===== [System Information: $(hostname)] ====="
+echo "Uptime: $(uptime -p)"
+echo "CPU Load: $(uptime | awk -F'load average[s]?: ' '{print $2}')"
+echo
+echo "Memory Usage:"
+free -h
+echo
+
+# ===== Get User Sessions from ctxqsession =====
+echo "===== [User Session Info] ====="
+all_users=$(ctxqsession 2>/dev/null | awk 'NR>2 {print $2}' | sort -u)
+active_disconnected_users=$(ctxqsession 2>/dev/null | grep -i -e "Active" -e "Disconnected" -e "disc" | awk '{print $2}' | sort -u)
+leftover_users=$(comm -23 <(echo "$all_users" | sort -u) <(echo "$active_disconnected_users" | sort -u))
+
+if [ -z "$leftover_users" ]; then
+    echo "No Citrix users with leftover process"
+else
+    echo "===== [Leftover User Processes] ====="
+    for user in $leftover_users; do
+        clean_user=$(echo "$user" | awk -F'\\' '{print $NF}')
+        if id "$clean_user" &>/dev/null; then
+            ps -u "$clean_user" -o pid,comm --no-headers \
+            | grep -Ev '^(systemd|dbus|sshd|cron|bash|sh|citrix|ctx|postgres|mate|xfce|gnome|pulseaudio|gvfs|Xorg|xrdp|lightdm|login)' \
+            | awk -v u="$clean_user" 'NR==1{print "User:", u} {printf "PID: %-6s CMD: %s\n", $1, $2}'
+        fi
+    done
+fi
+
+# ===== ctxgfx Process Session ID Check =====
+echo
+echo "===== [ctxgfx Process Session ID Mismatch] ====="
+valid_sessions=$(ctxquser 2>/dev/null | awk 'NR>1 {split($2,a,":"); print a[2]}')
+ps_ctxgfx=$(ps -ef | grep session | grep ctxgfx)
+
+mismatch_found=false
+while read -r line; do
+    [ -z "$line" ] && continue
+    ps_sessid=$(echo "$line" | awk '{print $NF}')
+    if ! grep -qx "$ps_sessid" <<< "$valid_sessions"; then
+        echo "$line"
+        mismatch_found=true
+    fi
+done <<< "$ps_ctxgfx"
+
+if [ "$mismatch_found" = false ]; then
+    echo "All ctxgfx processes match valid session IDs"
+fi
+
+# ===== NFS, autofs, SSD Error Check =====
+echo
+echo "===== [Error Checks] ====="
+dmesg | grep -iE 'nfs|autofs|ssd' | head -n 1 | grep -q . && \
+    echo "System Error Detected: $(dmesg | grep -iE 'nfs|autofs|ssd' | head -n 1)" || \
+    echo "No NFS/Autofs/SSD errors found."
+
+# ===== NFS Hung Mount Checks =====
+hung_list=""
+while read -r mnt; do
+    if ! timeout 10 stat "$mnt" >/dev/null 2>&1; then
+        hung_list+="$mnt : HUNG"$'\n'
+    fi
+done < <(mount | awk '/ nfs / {print $3}')
+
+if [ -n "$hung_list" ]; then
+    echo
+    echo "===== [Hung NFS Mounts] ====="
+    echo "$hung_list"
+fi
+
+echo
+echo "===== [Report Saved To] ====="
+echo "$report"
