@@ -1,0 +1,42 @@
+# ---- Build Merged Summary ----
+echo "===== [Merged Summary Report] =====" > "$SUMMARY_FILE"
+found_any=false
+
+for logfile in "$ADMIN_REPORT_DIR"/*_report.log; do
+    [[ ! -e "$logfile" ]] && continue
+    host=$(basename "$logfile" _report.log)
+    issue="OK"
+
+    # ---- GVFS Cache ----
+    if grep -q "GVFS cache issue detected" "$logfile"; then
+        issue="GVFS cache issue"
+        found_any=true
+    fi
+
+    # ---- Hung NFS Mounts ----
+    hung_mounts=$(grep -iE "HUNG[[:space:]:]+/" "$logfile" \
+        | sed -E 's/.*HUNG[[:space:]:]+//I' | tr '\n' ' ' | xargs)
+    if [[ -n "$hung_mounts" ]]; then
+        issue="Hung NFS mount(s): $hung_mounts"
+        found_any=true
+    fi
+
+    # ---- Leftover Users ----
+    if grep -q "Leftover Citrix users found" "$logfile"; then
+        issue="Leftover Citrix users"
+        found_any=true
+    fi
+
+    # ---- Load Below Threshold ----
+    if grep -q "Load below" "$logfile"; then
+        issue="Load below threshold (Skipped)"
+    fi
+
+    # ---- Clean whitespace & print safely ----
+    clean_issue=$(echo "$issue" | tr -s ' ')
+    printf "%-20s : %s\n" "$host" "$clean_issue" >> "$SUMMARY_FILE"
+done
+
+if [ "$found_any" = false ]; then
+    echo "No issues found on any host." >> "$SUMMARY_FILE"
+fi
