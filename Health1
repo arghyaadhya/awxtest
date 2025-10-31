@@ -1,0 +1,188 @@
+#!/bin/bash
+LANG=C
+
+# ----------------------------------------------------------
+# Citrix Remote Health Check (Final + Hung NFS Path Details)
+# ----------------------------------------------------------
+
+SERVER_LIST_FILE="/etc/citrix/server_list.txt"
+USERNAME="citrixadmin"
+PASSWORD="MyP@ssword123"
+LOAD_THRESHOLD=3
+MAX_PARALLEL=3
+ADMIN_REPORT_DIR="/var/log/citrix_remote_reports"
+SUMMARY_FILE="$ADMIN_REPORT_DIR/final_summary_$(date +%F_%H-%M).log"
+
+# ---- Email settings ----
+SEND_EMAIL="yes"
+EMAIL_SUBJECT="Citrix Health Check Summary - $(date +%F_%H:%M)"
+EMAIL_RECIPIENTS="admin1@example.com,admin2@example.com,admin3@example.com"
+
+mkdir -p "$ADMIN_REPORT_DIR"
+
+echo "===== Citrix Remote Health Check Started: $(date) ====="
+echo "Running up to $MAX_PARALLEL servers in parallel"
+echo
+
+mapfile -t servers < "$SERVER_LIST_FILE"
+job_count=0
+
+# ---- Run Remote Health Checks ----
+for host in "${servers[@]}"; do
+    [[ -z "$host" || "$host" =~ ^# ]] && continue
+    echo "🔹 Starting health check on: $host"
+
+    (
+        sshpass -p "$PASSWORD" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 "$USERNAME@$host" "
+            LANG=C
+            report=\"/var/log/citrix_healthcheck_\$(hostname)_\$(date +%F_%H-%M).log\"
+            mkdir -p /var/log
+            exec > >(tee -a \"\$report\") 2>&1
+
+            echo \"===== [System Info: \$(hostname)] =====\"
+            uptime -p
+            echo 'CPU Load:' \$(uptime | awk -F'load average[s]?: ' '{print \$2}')
+            echo
+            free -h
+            echo
+
+            load=\$(uptime | awk -F'load average[s]?: ' '{print \$2}' | cut -d',' -f1 | tr -d ' ')
+            if (( \${load%%.*} < $LOAD_THRESHOLD )); then
+                echo 'Load below $LOAD_THRESHOLD, skipping full check.'
+                echo 'Report saved to:' \"\$report\"
+                exit 0
+            fi
+
+            echo \"===== [User Session Info] =====\"
+            all_users=\$(ctxqsession 2>/dev/null | awk 'NR>2 {print \$2}' | sort -u)
+            active=\$(ctxqsession 2>/dev/null | grep -Ei 'Active|Disconnected|disc' | awk '{print \$2}' | sort -u)
+            leftover=\$(comm -23 <(echo \"\$all_users\" | sort -u) <(echo \"\$active\" | sort -u))
+
+            if [ -z \"\$leftover\" ]; then
+                echo 'No leftover Citrix users'
+            else
+                echo 'Leftover Citrix users found:'
+                echo \"\$leftover\"
+            fi
+
+            echo
+            echo \"===== [GVFS Cache Check] =====\"
+            gvfs_count=\$(ps -ef | grep gvfs | grep -v grep | wc -l)
+            if (( gvfs_count > 10 )); then
+                echo \"GVFS cache issue detected (\$gvfs_count processes)\"
+            else
+                echo 'No GVFS cache issue'
+            fi
+
+            echo
+            echo \"===== [NFS Hung Mounts] =====\"
+            hung_found=false
+            while read -r mnt; do
+                if ! timeout 5 stat \"\$mnt\" >/dev/null 2>&1; then
+                    echo \"HUNG: \$mnt\"
+                    hung_found=true
+                fi
+            done < <(mount | awk '/ nfs / {print \$3}')
+            if [ \"\$hung_found\" = false ]; then
+                echo 'No hung NFS mounts detected.'
+            fi
+
+            echo
+            echo \"Report saved to: \$report\"
+        " > "$ADMIN_REPORT_DIR/${host}_report.log" 2>&1
+
+        # ---- Cleanup remote logs ----
+        sshpass -p "$PASSWORD" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 "$USERNAME@$host" \
+            "rm -f /var/log/citrix_healthcheck_*.log >/dev/null 2>&1"
+
+        echo "✅ $host completed. Report saved to: $ADMIN_REPORT_DIR/${host}_report.log"
+    ) &
+
+    ((job_count++))
+    if (( job_count >= MAX_PARALLEL )); then
+        wait -n
+        ((job_count--))
+    fi
+done
+
+wait
+echo
+echo "===== All Remote Checks Completed: $(date) ====="
+echo
+
+# ---- Build Merged Summary ----
+echo "===== [Merged Summary Report] =====" > "$SUMMARY_FILE"
+found_any=false
+
+for logfile in "$ADMIN_REPORT_DIR"/*_report.log; do
+    [[ ! -e "$logfile" ]] && continue
+    host=$(basename "$logfile" _report.log)
+    issue="OK"
+
+    # ---- GVFS Cache ----
+    if grep -q "GVFS cache issue detected" "$logfile"; then
+        issue="GVFS cache issue"
+        found_any=true
+    fi
+
+    # ---- Hung NFS Mounts ----
+    hung_mounts=$(grep -iE "HUNG[[:space:]:]+/" "$logfile" | sed -E 's/.*HUNG[[:space:]:]+//I' | xargs)
+    if [[ -n "$hung_mounts" ]]; then
+        issue="Hung NFS mount(s): $hung_mounts"
+        found_any=true
+    fi
+
+    # ---- Leftover Users ----
+    if grep -q "Leftover Citrix users found" "$logfile"; then
+        issue="Leftover Citrix users"
+        found_any=true
+    fi
+
+    # ---- Load Below Threshold ----
+    if grep -q "Load below" "$logfile"; then
+        issue="Load below threshold (Skipped)"
+    fi
+
+    printf "%-20s : %s\n" "$host" "$issue" >> "$SUMMARY_FILE"
+done
+
+if [ "$found_any" = false ]; then
+    echo "No issues found on any host." >> "$SUMMARY_FILE"
+fi
+
+# ---- Final Output ----
+echo "===== All Checks Completed: $(date) ====="
+echo "Reports stored in: $ADMIN_REPORT_DIR"
+echo "Merged summary:    $SUMMARY_FILE"
+echo "====================================================="
+
+# ---- Email Report ----
+if [[ "$SEND_EMAIL" == "yes" ]]; then
+    if grep -q -E "GVFS|Hung|Leftover" "$SUMMARY_FILE"; then
+        echo "📧 Sending summary email (with attachment) to: $EMAIL_RECIPIENTS"
+        {
+            echo "Subject: $EMAIL_SUBJECT"
+            echo "To: $EMAIL_RECIPIENTS"
+            echo "MIME-Version: 1.0"
+            echo "Content-Type: multipart/mixed; boundary=\"SEP\""
+            echo
+            echo "--SEP"
+            echo "Content-Type: text/plain"
+            echo
+            echo "Citrix Health Check Summary Report"
+            echo "Generated on: $(date)"
+            echo
+            cat "$SUMMARY_FILE"
+            echo
+            echo "Full reports available in: $ADMIN_REPORT_DIR"
+            echo "--SEP"
+            echo "Content-Type: text/plain; name=\"$(basename "$SUMMARY_FILE")\""
+            echo "Content-Disposition: attachment; filename=\"$(basename "$SUMMARY_FILE")\""
+            echo
+            cat "$SUMMARY_FILE"
+            echo "--SEP--"
+        } | /usr/sbin/sendmail -t
+    else
+        echo "✅ No issues found — email not sent."
+    fi
+fi
