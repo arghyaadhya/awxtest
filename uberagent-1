@@ -1,0 +1,178 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+############################################
+# CONFIGURATION
+############################################
+
+HOSTFILE="hosts.txt"               # One host per line
+USER="root"
+PASS="YourPassword"                # If using SSH keys, remove sshpass parts
+NFS_PATH="/mnt/nfs/uberagent"      # Folder containing installer + conf
+REMOTE_TMP="/tmp/uberagent_install"
+CONF_PATH="/etc/uberAgent"
+LOG="uberagent_install.log"
+CONF_NAME="uberAgent.conf"
+SERVICE_NAME="uberAgent.service"
+CONNECT_TIMEOUT=10
+
+# Auto-detect installer names (first .rpm and first .deb found)
+DEB_NAME=""
+RPM_NAME=""
+
+############################################
+# SSH options with timeout
+############################################
+SSH_OPT="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=${CONNECT_TIMEOUT}"
+
+echo "===== uberAgent Installation Started: $(date -u) =====" | tee -a "$LOG"
+
+############################################
+# AUTO-DETECT INSTALLER FILENAMES
+############################################
+if [[ -z "$DEB_NAME" ]]; then
+    DEB_FILE=$(ls -1 "$NFS_PATH"/*.deb 2>/dev/null | head -n1 || true)
+    [[ -n "$DEB_FILE" ]] && DEB_NAME=$(basename "$DEB_FILE")
+fi
+
+if [[ -z "$RPM_NAME" ]]; then
+    RPM_FILE=$(ls -1 "$NFS_PATH"/*.rpm 2>/dev/null | head -n1 || true)
+    [[ -n "$RPM_FILE" ]] && RPM_NAME=$(basename "$RPM_FILE")
+fi
+
+echo "Detected DEB installer: ${DEB_NAME:-None}"
+echo "Detected RPM installer: ${RPM_NAME:-None}"
+
+
+############################################
+# CHECK REQUIRED FILE
+############################################
+if [[ ! -f "$NFS_PATH/$CONF_NAME" ]]; then
+    echo "ERROR: Config file missing: $NFS_PATH/$CONF_NAME"
+    exit 1
+fi
+
+if [[ -z "$DEB_NAME" && -z "$RPM_NAME" ]]; then
+    echo "ERROR: No installer found in $NFS_PATH"
+    exit 1
+fi
+
+############################################
+# LOAD HOST LIST INTO ARRAY (SAFE)
+############################################
+mapfile -t HOSTS < "$HOSTFILE"
+
+############################################
+# PROCESS EACH HOST USING FOR LOOP
+############################################
+for host in "${HOSTS[@]}"; do
+    host=$(echo "$host" | xargs)  # trim
+    [[ -z "$host" || "$host" =~ ^# ]] && continue
+
+    echo "---- Processing $host ----" | tee -a "$LOG"
+
+    ############################################
+    # TEST SSH CONNECTIVITY
+    ############################################
+    if ! sshpass -p "$PASS" ssh $SSH_OPT "$USER@$host" "echo ok" >/dev/null 2>&1; then
+        echo "❌ $host: SSH unreachable (timeout $CONNECT_TIMEOUT sec). Skipping..." | tee -a "$LOG"
+        continue
+    fi
+
+    ############################################
+    # CREATE REMOTE TEMP FOLDER
+    ############################################
+    sshpass -p "$PASS" ssh $SSH_OPT "$USER@$host" "mkdir -p '$REMOTE_TMP'"
+
+    ############################################
+    # IDENTIFY REMOTE OS TYPE
+    ############################################
+    OS_TYPE=$(sshpass -p "$PASS" ssh $SSH_OPT "$USER@$host" \
+        "awk -F= '/^ID=/{gsub(/\"/,\"\",\$2);print \$2;exit}' /etc/os-release 2>/dev/null || echo unknown")
+
+    OS_TYPE=${OS_TYPE,,}
+    echo "$host OS detected: $OS_TYPE" | tee -a "$LOG"
+
+    ############################################
+    # SELECT INSTALLER BASED ON REMOTE OS
+    ############################################
+    if [[ "$OS_TYPE" == "debian" || "$OS_TYPE" == "ubuntu" ]]; then
+        INSTALLER_LOCAL="$NFS_PATH/$DEB_NAME"
+    else
+        INSTALLER_LOCAL="$NFS_PATH/$RPM_NAME"
+    fi
+
+    if [[ ! -f "$INSTALLER_LOCAL" ]]; then
+        echo "❌ $host: Installer missing locally: $INSTALLER_LOCAL" | tee -a "$LOG"
+        continue
+    fi
+
+    ############################################
+    # COPY INSTALLER + CONFIG (SINGLE SCP)
+    ############################################
+    echo "$host: Copying installer + config files..." | tee -a "$LOG"
+    if ! sshpass -p "$PASS" scp $SSH_OPT "$INSTALLER_LOCAL" "$NFS_PATH/$CONF_NAME" "$USER@$host:$REMOTE_TMP/"; then
+        echo "❌ $host: SCP failed, skipping..." | tee -a "$LOG"
+        continue
+    fi
+
+    ############################################
+    # DETECT INSTALLER NAME ON REMOTE MACHINE
+    ############################################
+    REMOTE_INSTALLER=$(sshpass -p "$PASS" ssh $SSH_OPT "$USER@$host" \
+        "ls -1 '$REMOTE_TMP'/*.rpm '$REMOTE_TMP'/*.deb 2>/dev/null | head -n1 || true")
+
+    if [[ -z "$REMOTE_INSTALLER" ]]; then
+        echo "❌ $host: Installer NOT found after upload" | tee -a "$LOG"
+        sshpass -p "$PASS" ssh $SSH_OPT "$USER@$host" "ls -la '$REMOTE_TMP'" | tee -a "$LOG"
+        continue
+    fi
+
+    echo "$host: Remote installer path: $REMOTE_INSTALLER" | tee -a "$LOG"
+
+    ############################################
+    # INSTALL UBERAGENT
+    ############################################
+    echo "$host: Installing uberAgent..." | tee -a "$LOG"
+
+    if [[ "$REMOTE_INSTALLER" == *.deb ]]; then
+        sshpass -p "$PASS" ssh $SSH_OPT "$USER@$host" \
+            "dpkg -i '$REMOTE_INSTALLER' || (apt-get update -y && apt-get install -f -y)"
+    else
+        sshpass -p "$PASS" ssh $SSH_OPT "$USER@$host" \
+            "if command -v dnf >/dev/null; then dnf install -y '$REMOTE_INSTALLER'; else yum install -y '$REMOTE_INSTALLER'; fi"
+    fi
+
+    ############################################
+    # REPLACE CONFIG FILE
+    ############################################
+    echo "$host: Updating config..." | tee -a "$LOG"
+    sshpass -p "$PASS" ssh $SSH_OPT "$USER@$host" "
+        mkdir -p '$CONF_PATH'
+        if [ -f '$CONF_PATH/$CONF_NAME' ]; then
+            cp -p '$CONF_PATH/$CONF_NAME' '$CONF_PATH/${CONF_NAME}.bak.$(date +%s)'
+        fi
+        cp -p '$REMOTE_TMP/$CONF_NAME' '$CONF_PATH/$CONF_NAME'
+        chmod 644 '$CONF_PATH/$CONF_NAME'
+    "
+
+    ############################################
+    # ENABLE & START SERVICE
+    ############################################
+    echo "$host: Enabling + starting $SERVICE_NAME..." | tee -a "$LOG"
+    sshpass -p "$PASS" ssh $SSH_OPT "$USER@$host" "
+        systemctl daemon-reload
+        systemctl enable '$SERVICE_NAME'
+        systemctl start '$SERVICE_NAME'
+    "
+
+    echo "✔ $host: Completed" | tee -a "$LOG"
+
+    ############################################
+    # CLEANUP
+    ############################################
+    sshpass -p "$PASS" ssh $SSH_OPT "$USER@$host" "rm -rf '$REMOTE_TMP'" >/dev/null 2>&1 || true
+
+done
+
+echo "===== uberAgent Installation Completed: $(date -u) =====" | tee -a "$LOG"
