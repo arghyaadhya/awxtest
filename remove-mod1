@@ -1,0 +1,605 @@
+#!/bin/bash
+# ---------------------------------------------------------------------
+# LSF Host Removal Script (Optimized & Fixed)
+# Last Revision Date: 2025-11-19
+# - One daily logfile per farm (configurable via LSF_REMOVE_LOGDIR)
+# - Safe quoting, backups, arrays for reports
+# - Functions return status (no `continue` inside functions)
+# ---------------------------------------------------------------------
+
+set -u -o pipefail
+
+# Ensure running as lsfadmin (uid 11460)
+if [[ $(id -u) -ne 11460 ]]; then
+  echo "Must be lsfadmin to run script" >&2
+  exit 1
+fi
+
+# timestamp helper
+ts_global() { date +"%Y-%m-%d_%H.%M.%S"; }
+
+# ---------- helper functions ----------
+escape_for_sed() { printf '%s' "$1" | sed -e 's/[\/&]/\\&/g'; }
+
+# ---------- CLI parsing ----------
+removeHosts_usage() {
+  cat <<EOF
+Usage: $0 -f farmName [-d hostfile] [-h hostname] [-k] [-l]
+  -d hostfile     File containing hostnames (one per line)
+  -f farmName     Farm name (required)
+  -h hostname     Single host (space-separated allowed)
+  -k              Forcefully kill all jobs on host(s) before removal
+  -l              FLM option: do not check for jobs
+EOF
+  exit 1
+}
+
+killjobs=false
+flm=false
+hostisfile=false
+hostisname=false
+hostName=""
+deleteFiles=""
+farmName=""
+
+while getopts ":d:f:h:kl" opt; do
+  case "$opt" in
+    d) hostisfile=true; deleteFiles="$OPTARG" ;;
+    f) farmName="$OPTARG" ;;
+    h) hostisname=true; hostName="$OPTARG" ;;
+    k) killjobs=true ;;
+    l) flm=true ;;
+    *) removeHosts_usage ;;
+  esac
+done
+
+if [[ -z "${farmName:-}" ]]; then
+  echo "Farm name not entered." >&2
+  removeHosts_usage
+fi
+
+# ---------- logging (one file per day) ----------
+# prefer env var LSF_REMOVE_LOGDIR; otherwise use default
+if [[ -n "${LSF_REMOVE_LOGDIR:-}" ]]; then
+  LOGDIR="$LSF_REMOVE_LOGDIR"
+else
+  LOGDIR="/var/log/lsf_remove"
+fi
+mkdir -p "$LOGDIR" 2>/dev/null || true
+if [[ ! -w "$LOGDIR" ]]; then
+  LOGDIR="/tmp/lsf_remove_logs"
+  mkdir -p "$LOGDIR" || true
+fi
+LOGFILE="$LOGDIR/lsf_remove_${farmName}_$(date +%F).log"
+: > "$LOGFILE" || { echo "Cannot write to $LOGFILE" >&2; exit 1; }
+
+log() {
+  local msg="$*"
+  local t
+  t=$(ts_global)
+  echo "${t} ${msg}" | tee -a "$LOGFILE"
+}
+
+# ---------- paths & basic checks ----------
+ts_run=$(date +"%Y-%m-%d_%H.%M.%S")
+filepath1="/global/lsf/cells/${farmName}/conf/lsf.cluster.${farmName}"
+filepath2="/global/lsf/cells/${farmName}/conf/lsbatch/${farmName}/configdir/lsb.hosts"
+filepath3="/global/lsf/work/${farmName}/ego/lim/hostcache"
+dirpath1="/global/lsf/cells/${farmName}/conf"
+dirpath2="/global/lsf/cells/${farmName}/conf/lsbatch/${farmName}/configdir/lsb.*"
+dirpath3="/global/lsf/cfadm/etc/farmhosts"
+path3="/global/lsf/cells/${farmName}/conf/profile.lsf"
+path7="/global/lsf/cells/${farmName}/conf/lsbatch/${farmName}/configdir/lsb.resources"
+path8="/global/lsf/cells/${farmName}/conf/lsbatch/${farmName}/configdir/lsb.resources.new"
+conf_path="/global/lsf/cells/${farmName}/conf"
+
+# check commands (log but don't immediately exit; script handles missing commands gracefully)
+for cmd in bkill bhosts lsadmin brsvs grep awk sed ssh ping find cp mv rm; do
+  if ! command -v "$cmd" >/dev/null 2>&1; then
+    log "Warning: command '$cmd' not in PATH; some actions may fail."
+  fi
+done
+
+pl1=$(command -v perl || true)
+var1=$(command -v bkill || true)
+
+# source farm profile (required)
+if [[ -f "$path3" ]]; then
+  # shellcheck disable=SC1090
+  source "$path3" || { log "Failed to source $path3"; exit 1; }
+else
+  log "Profile $path3 not found. Exiting."
+  exit 1
+fi
+
+# ---------- report arrays ----------
+removed_array=()
+skipped_array=()
+
+# ---------- backup helper ----------
+backup_file() {
+  local file="$1"
+  if [[ -f "$file" ]]; then
+    cp -a -- "$file" "${file}.bak_${ts_run}" && log "Backup created: ${file}.bak_${ts_run}"
+    find "$(dirname "$file")" -maxdepth 1 -name "*.bak_*" -mmin +30 -delete 2>/dev/null || true
+  fi
+}
+
+# ---------- replace farm name in farmhosts config ----------
+replace_farmname() {
+  local fh="$dirpath3/$line"
+  if [[ ! -d "$dirpath3" ]]; then
+    log "Farm host dir not found: $dirpath3"
+    return 1
+  fi
+  if [[ ! -f "$fh" ]]; then
+    log "farmhosts file not found for $line"
+    return 1
+  fi
+  local old="farm=${farmName}"
+  local new="farm=none"
+  sed -i "s/$(escape_for_sed "$old")/$(escape_for_sed "$new")/g" "$fh" || true
+  log "Replaced farm name in $(basename "$fh")"
+  return 0
+}
+
+# ---------- delete host from configs ----------
+delete_host() {
+  if [[ ! -f "$filepath1" || ! -f "$filepath2" ]]; then
+    log "Missing config file(s): $filepath1 or $filepath2"
+    return 1
+  fi
+
+  backup_file "$filepath1"
+  backup_file "$filepath2"
+
+  local esc
+  esc=$(escape_for_sed "$line")
+
+  # Remove the hostname occurrences in lsb.hosts (words & trailing spaces)
+  sed -i -E "s/(\\<${esc}\\>)[[:space:]]*//g" "$filepath2" 2>/dev/null || true
+  sed -i '/^[[:space:]]*$/d' "$filepath2" 2>/dev/null || true
+  # remove lines starting with digit if present (as original attempted)
+  sed -i '/^[0-9]/d' "$filepath2" 2>/dev/null || true
+  sed -i "/${esc}/d" "$filepath1" 2>/dev/null || true
+
+  # update file ownership/permissions - non-fatal
+  chown lsfadmin:cfadm "$filepath1" 2>/dev/null || true
+  chmod 644 "$filepath1" 2>/dev/null || true
+  chown lsfadmin:cfadm "$filepath2" 2>/dev/null || true
+  chmod 644 "$filepath2" 2>/dev/null || true
+
+  log "Removed $line from config files."
+  removed_array+=("$line")
+  return 0
+}
+
+# ---------- kill and expire ----------
+kill_expire() {
+  # ping
+  ping -c 2 -W 2 "$line" >/dev/null 2>&1
+  local ping_rc=$?
+  if [[ $ping_rc -eq 0 ]]; then
+    log "$line reachable by ping. Testing SSH..."
+    ssh -q -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=5 "$line" 'exit 0' >/dev/null 2>&1
+    if [[ $? -eq 0 ]]; then
+      log "SSH ok to $line. Stopping lsfd..."
+      ssh -o StrictHostKeyChecking=no "$line" "sudo /opt/snps-lsf/init/lsfd stop" >/dev/null 2>&1 || log "Warning: lsf stop failed on $line"
+      log "Running lsadmin expire $line"
+      source "$path3" && lsadmin expire "$line" >/dev/null 2>&1 || true
+      sed -i "/$(escape_for_sed "$line")/d" "$filepath3" 2>/dev/null || true
+      return 0
+    else
+      log "SSH failed to $line. Attempting lsadmin expire locally"
+      source "$path3" && lsadmin expire "$line" >/dev/null 2>&1 || true
+      sed -i "/$(escape_for_sed "$line")/d" "$filepath3" 2>/dev/null || true
+      return 0
+    fi
+  else
+    log "$line not reachable by ping. Attempting lsadmin expire locally"
+    source "$path3" && lsadmin expire "$line" >/dev/null 2>&1 || true
+    sed -i "/$(escape_for_sed "$line")/d" "$filepath3" 2>/dev/null || true
+    return 0
+  fi
+}
+
+# ---------- manage lsb.resources ----------
+resources() {
+  log "Cleaning lsb.resources for $line"
+  if [[ -f "$path7" ]]; then
+    # remove non-comment app_quser lines referencing host
+    sed -i '/^[^#].*app_quser.*'"$line"'.*/d' "$path7" 2>/dev/null || true
+
+    local tmp
+    tmp=$(mktemp "${path8}.tmp.XXXX") || tmp="${path8}.tmp"
+    if [[ -n "$pl1" ]]; then
+      # attempt perl-driven smart removal; fallback to copying if perl fails
+      $pl1 -pe "s/(?<=[a-zA-Z0-9\\-\\.]+\\.[a-zA-Z]+)(?=\\s+)${line}(?=\\s+[0-9a-zA-Z\\.-]+\\.[a-zA-Z]+)|(?<=[a-zA-Z0-9\\-\\.]+\\.[a-zA-Z]+\\s)${line}|${line}(?=\\s+[0-9a-zA-Z\\.-]+\\.[a-zA-Z]+)//g" "$path7" > "$tmp" 2>/dev/null || cp -f "$path7" "$tmp"
+    else
+      cp -f "$path7" "$tmp"
+      sed -i '/^[^#].*app_quser.*'"$line"'.*/d' "$tmp" 2>/dev/null || true
+    fi
+
+    # remove block between blank lines containing host
+    awk -v L="$line" '
+      { lines[NR]=$0 }
+      END {
+        blank_above=0; found=0; delete_start=0; delete_end=0
+        for(i=1;i<=NR;i++){
+          if(lines[i]=="") blank_above=i
+          if(lines[i] ~ L && lines[i] !~ /^#/){
+            for(j=i+1;j<=NR;j++){ if(lines[j]==""){ blank_below=j; break } }
+            delete_start=blank_above+1
+            delete_end=blank_below-1
+            found=1
+            break
+          }
+        }
+        for(i=1;i<=NR;i++){
+          if(found && i>=delete_start && i<=delete_end) continue
+          print lines[i]
+        }
+      }' "$tmp" > "${tmp}.out" 2>/dev/null || cp -f "$tmp" "${tmp}.out"
+
+    mv "${tmp}.out" "$path8" 2>/dev/null || cp -f "${tmp}.out" "$path8"
+    sed -i '/^[^#].*app_quser.*'"$line"'.*/d' "$path8" 2>/dev/null || true
+    cp -f "$path8" "$path7"
+    rm -f "$path8" "$tmp" 2>/dev/null || true
+    log "lsb.resources updated for $line"
+  else
+    log "lsb.resources file $path7 not found"
+  fi
+  return 0
+}
+
+# ---------- rescheck: decide if safe to remove ----------
+rescheck() {
+  # expects $output and $count to be set by caller
+  # returns 0 => proceed removal, 1 => skip
+  if [[ "${count:-0}" -eq 1 ]]; then
+    if [[ "$output" =~ ^lsb\.resources$ ]]; then
+      resources
+      log "Checking FRS reservation for $line"
+      frs_out=$(brsvs -w | grep -i "$line" 2>/dev/null || true)
+      if [[ -z "$frs_out" ]]; then
+        kill_expire || true
+        delete_host || true
+        return 0
+      else
+        log "FRS reserved for $line. Skipping."
+        skipped_array+=("$line (FRS reserved)")
+        return 1
+      fi
+    else
+      # found in other file(s)
+      log "Host $line found in other file(s): $output"
+      frs_out=$(brsvs -w | grep -i "$line" 2>/dev/null || true)
+      if [[ -z "$frs_out" ]]; then
+        replace_farmname || true
+        kill_expire || true
+        delete_host || true
+        return 0
+      else
+        skipped_array+=("$line (FRS reserved)")
+        return 1
+      fi
+    fi
+  else
+    if echo "$output" | grep -qw "lsb.resources"; then
+      resources
+      output1=$(grep -R --exclude="*.bak*" --exclude="lsb.*.*" --exclude="lsb.hosts" --exclude="1" "$line" $dirpath2 2>/dev/null | awk '{print $1}' | awk '{split($0,a,"/"); split(a[10],b,":"); print b[1]}' | sort -u)
+      count1=$(echo "$output1" | wc -l)
+      if [[ "$count1" -ge 1 ]]; then
+        rescheck || return 1
+      else
+        frs_out=$(brsvs -w | grep -i "$line" 2>/dev/null || true)
+        if [[ -z "$frs_out" ]]; then
+          kill_expire || true
+          delete_host || true
+          return 0
+        else
+          skipped_array+=("$line (FRS reserved)")
+          return 1
+        fi
+      fi
+    fi
+  fi
+  return 0
+}
+
+# ---------- interact/kill option ----------
+get_user_option() {
+  log "$line still has $bhosts_out jobs running"
+  echo "Do you want to kill all jobs (yes), skip the host (no), or disable the host using badmin hclose (disable)?"
+  read -r option
+  case "$option" in
+    yes)
+      log "User chose to kill all jobs on $line"
+      lsid 2>/dev/null || true
+      if [[ -n "$var1" ]]; then
+        "$var1" -u all -m "$line" 0 >/dev/null 2>&1 || true
+      else
+        bkill -u all -m "$line" 0 >/dev/null 2>&1 || true
+      fi
+      # wait until jobs reach 0
+      while true; do
+        sleep 5
+        jout=$(bhosts "$line" 2>/dev/null | awk 'NR>1{print $4; exit}')
+        if [[ -z "$jout" || "$jout" -eq 0 ]]; then
+          log "All jobs on $line finished"
+          break
+        else
+          log "Jobs still running on $line, waiting..."
+        fi
+      done
+      return 0
+      ;;
+    no)
+      log "Skipping $line (user chose no)"
+      skipped_array+=("$line (jobs running)")
+      return 1
+      ;;
+    disable)
+      log "Disabling $line via badmin hclose"
+      badmin hclose -C "Waiting for jobs to drain" "$line" >/dev/null 2>&1 || true
+      skipped_array+=("$line (disabled)")
+      return 1
+      ;;
+    *)
+      log "Invalid option: $option"
+      return 1
+      ;;
+  esac
+}
+
+# ---------- main host search & removal logic ----------
+search_hosts() {
+  log "Processing host: $line"
+
+  master_hosts=$(bhosts 2>/dev/null | grep master | awk '{print $1}' || true)
+  if echo "$master_hosts" | grep -q "^${line}$"; then
+    log "$line is a master host; skipping"
+    skipped_array+=("$line (master host)")
+    return 1
+  fi
+
+  # if bhosts fails, check farmhosts config
+  bhosts "$line" >/dev/null 2>&1 || bhosts_rc=$? || bhosts_rc=$?
+  bhosts_rc=${bhosts_rc:-0}
+  if [[ $bhosts_rc -ne 0 ]]; then
+    if [[ -f "${dirpath3}/${line}" ]]; then
+      check1=$(awk -F'=' '/farm/{print $2; exit}' "${dirpath3}/${line}" | tr -d '[:space:]') || check1=""
+      if [[ "$check1" == "$farmName" || "$check1" == "none" ]]; then
+        log "Host $line not in farm according to bhosts, but farmhosts exists"
+        output=$(grep -R --exclude="*.bak*" --exclude="lsb.*.*" --exclude="lsb.hosts" --exclude="1" "$line" $dirpath2 2>/dev/null | awk '{print $1}' | awk '{split($0,a,"/"); split(a[10],b,":"); print b[1]}' | sort -u)
+        count=$(echo "$output" | wc -l)
+        if [[ "$count" -ge 1 ]]; then
+          replace_farmname || true
+          rescheck || return 1
+        else
+          frs_out=$(brsvs -w | grep -i "$line" 2>/dev/null || true)
+          if [[ -z "$frs_out" ]]; then
+            replace_farmname || true
+            kill_expire || true
+            delete_host || true
+            return 0
+          else
+            skipped_array+=("$line (FRS reserved)")
+            return 1
+          fi
+        fi
+      else
+        log "$line is in a different farm ($check1) - removing without killing LSF"
+        output=$(grep -R --exclude="*.bak*" --exclude="lsb.*.*" --exclude="lsb.hosts" --exclude="1" "$line" $dirpath2 2>/dev/null | awk '{print $1}' | awk '{split($0,a,"/"); split(a[10],b,":"); print b[1]}' | sort -u)
+        count=$(echo "$output" | wc -l)
+        if [[ "$count" -ge 1 ]]; then
+          rescheck || return 1
+        else
+          frs_out=$(brsvs -w | grep -i "$line" 2>/dev/null || true)
+          if [[ -z "$frs_out" ]]; then
+            lsadmin expire "$line" >/dev/null 2>&1 || true
+            sed -i "/$(escape_for_sed "$line")/d" "$filepath3" 2>/dev/null || true
+            delete_host || true
+            return 0
+          else
+            skipped_array+=("$line (FRS reserved)")
+            return 1
+          fi
+        fi
+      fi
+    else
+      log "No farmhosts config for $line - skipping"
+      skipped_array+=("$line (invalid host)")
+      return 1
+    fi
+  fi
+
+  # normalize host name from bhosts output
+  new_line=$(bhosts "$line" 2>/dev/null | awk 'NR>1{print $1; exit}')
+  if [[ -z "$new_line" ]]; then
+    log "bhosts returned no entry for $line - skipping"
+    skipped_array+=("$line (no bhosts)")
+    return 1
+  fi
+  line="$new_line"
+
+  if [[ -f "${dirpath3}/${line}" ]]; then
+    check=$(awk -F'=' '/farm/{print $2; exit}' "${dirpath3}/${line}" | tr -d '[:space:]') || check=""
+  else
+    check="None"
+  fi
+
+  if [[ "$check" != "$farmName" && "$check" != "none" && "$check" != "None" ]]; then
+    # different farm
+    if [[ "$flm" = true ]]; then
+      log "FLM enabled; skipping job checks for $line"
+      output=$(grep -R --exclude="*.bak*" --exclude="lsb.*.*" --exclude="lsb.hosts" --exclude="1" "$line" $dirpath2 2>/dev/null | awk '{print $1}' | awk '{split($0,a,"/"); split(a[10],b,":"); print b[1]}' | sort -u)
+      count=$(echo "$output" | wc -l)
+      if [[ "$count" -ge 1 ]]; then
+        rescheck || return 1
+      else
+        lsadmin expire "$line" >/dev/null 2>&1 || true
+        sed -i "/$(escape_for_sed "$line")/d" "$filepath3" 2>/dev/null || true
+        delete_host || true
+        return 0
+      fi
+    fi
+
+    bhosts_out=$(bhosts "$line" 2>/dev/null | awk 'NR>1{print $4; exit}')
+    bhosts_out=${bhosts_out:-0}
+    log "$line has $bhosts_out jobs running"
+    if [[ "$bhosts_out" -eq 0 ]]; then
+      output=$(grep -R --exclude="*.bak*" --exclude="lsb.*.*" --exclude="lsb.hosts" --exclude="1" "$line" $dirpath2 2>/dev/null | awk '{print $1}' | awk '{split($0,a,"/"); split(a[10],b,":"); print b[1]}' | sort -u)
+      count=$(echo "$output" | wc -l)
+      if [[ "$count" -ge 1 ]]; then
+        rescheck || return 1
+      else
+        lsadmin expire "$line" >/dev/null 2>&1 || true
+        sed -i "/$(escape_for_sed "$line")/d" "$filepath3" 2>/dev/null || true
+        delete_host || true
+        return 0
+      fi
+    else
+      get_user_option || return 1
+    fi
+  else
+    # host is in same farm or none
+    if [[ "$flm" = true ]]; then
+      log "FLM enabled; not checking jobs."
+      output=$(grep -R --exclude="*.bak*" --exclude="lsb.*.*" --exclude="lsb.hosts" --exclude="1" "$line" $dirpath2 2>/dev/null | awk '{print $1}' | awk '{split($0,a,"/"); split(a[10],b,":"); print b[1]}' | sort -u)
+      count=$(echo "$output" | wc -l)
+      if [[ "$count" -ge 1 ]]; then
+        replace_farmname || true
+        rescheck || return 1
+      else
+        replace_farmname || true
+        kill_expire || true
+        delete_host || true
+        return 0
+      fi
+    fi
+
+    bhosts_out=$(bhosts "$line" 2>/dev/null | awk 'NR>1{print $4; exit}')
+    bhosts_out=${bhosts_out:-0}
+    log "$line has $bhosts_out jobs running"
+    if [[ "$bhosts_out" -eq 0 ]]; then
+      output=$(grep -R --exclude="*.bak*" --exclude="lsb.*.*" --exclude="lsb.hosts" --exclude="1" "$line" $dirpath2 2>/dev/null | awk '{print $1}' | awk '{split($0,a,"/"); split(a[10],b,":"); print b[1]}' | sort -u)
+      count=$(echo "$output" | wc -l)
+      if [[ "$count" -ge 1 ]]; then
+        rescheck || return 1
+      else
+        replace_farmname || true
+        kill_expire || true
+        delete_host || true
+        return 0
+      fi
+    else
+      get_user_option || return 1
+    fi
+  fi
+
+  return 0
+}
+
+# ---------- main flow ----------
+# single host(s)
+if [[ "$hostisname" = true ]]; then
+  if [[ -L "$conf_path" ]]; then
+    direc=$(readlink -f "$conf_path")
+    log "Conf path is a symlink to $direc; skipping removal."
+    exit 1
+  elif [[ -d "$conf_path" ]]; then
+    log "Processing single host(s): $hostName"
+    lsid 2>/dev/null || true
+    for line in $hostName; do
+      if [[ "$killjobs" = true ]]; then
+        bhosts "$line" >/dev/null 2>&1 || bhosts_rc=$?
+        if [[ ${bhosts_rc:-0} -ne 0 ]]; then
+          log "Host $line not in farm; skipping kill"
+        else
+          log "Forcefully killing jobs on $line"
+          if [[ -n "$var1" ]]; then
+            "$var1" -u all -m "$line" 0 >/dev/null 2>&1 || true
+          else
+            bkill -u all -m "$line" 0 >/dev/null 2>&1 || true
+          fi
+          while true; do
+            sleep 5
+            jout1=$(bhosts "$line" 2>/dev/null | awk 'NR>1{print $4; exit}')
+            jout1=${jout1:-0}
+            if [[ "$jout1" -eq 0 ]]; then
+              log "All jobs on $line finished."
+              break
+            fi
+          done
+        fi
+      fi
+      search_hosts || continue
+    done
+  else
+    log "Invalid conf_path: $conf_path"
+    exit 1
+  fi
+fi
+
+# hosts from file
+if [[ "$hostisfile" = true ]]; then
+  deleteFiles=$(realpath "$deleteFiles" 2>/dev/null || echo "$deleteFiles")
+  if [[ -L "$conf_path" ]]; then
+    direc=$(readlink -f "$conf_path")
+    log "Conf path is a symlink to $direc; skipping removal."
+    exit 1
+  elif [[ -d "$conf_path" ]]; then
+    log "Processing host list from $deleteFiles"
+    if [[ -f "$deleteFiles" ]]; then
+      lsid 2>/dev/null || true
+      while IFS= read -r line || [[ -n "$line" ]]; do
+        [[ -z "$line" ]] && continue
+        if [[ "$killjobs" = true ]]; then
+          bhosts "$line" >/dev/null 2>&1 || bhosts_rc=$?
+          if [[ ${bhosts_rc:-0} -ne 0 ]]; then
+            log "Host $line not in farm; skipping kill"
+          else
+            log "Forcefully killing jobs on $line"
+            if [[ -n "$var1" ]]; then
+              "$var1" -u all -m "$line" 0 >/dev/null 2>&1 || true
+            else
+              bkill -u all -m "$line" 0 >/dev/null 2>&1 || true
+            fi
+            while true; do
+              sleep 5
+              jout2=$(bhosts "$line" 2>/dev/null | awk 'NR>1{print $4; exit}')
+              jout2=${jout2:-0}
+              if [[ "$jout2" -eq 0 ]]; then
+                log "All jobs on $line finished."
+                break
+              fi
+            done
+          fi
+        fi
+        search_hosts || continue
+      done < "$deleteFiles"
+    else
+      log "Delete file $deleteFiles not found"
+      removeHosts_usage
+    fi
+  else
+    log "$dirpath1 invalid"
+    exit 1
+  fi
+fi
+
+# ---------- summary ----------
+log "Summary Report:"
+log "Number of hosts removed: ${#removed_array[@]}"
+if [[ ${#removed_array[@]} -gt 0 ]]; then
+  log "Removed Host List:"
+  for h in "${removed_array[@]}"; do log "  $h"; done
+fi
+log "Number of hosts skipped: ${#skipped_array[@]}"
+if [[ ${#skipped_array[@]} -gt 0 ]]; then
+  log "Skipped Host List:"
+  for h in "${skipped_array[@]}"; do log "  $h"; done
+fi
+
+exit 0
